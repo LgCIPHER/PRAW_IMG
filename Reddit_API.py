@@ -6,6 +6,12 @@ import requests
 import cv2 as cv
 import numpy as np
 import time
+from functools import wraps
+import logging
+import requests.adapters
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from tqdm import tqdm
 
 """Start Global variables"""
 dir_path = os.path.dirname(os.path.realpath(__file__))  # Path of this file
@@ -17,6 +23,18 @@ new_lst_img_name = "new_img.csv"
 new_lst_img_dir = os.path.join(dir_path, new_lst_img_name)
 """End Global variables"""
 
+def setup_logging(config):
+    """Setup logging configuration"""
+    log_level = config.get("output_settings", {}).get("log_level", "INFO")
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('reddit_scraper.log'),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger(__name__)
 
 def create_token():
     """Create credentials by getting input from user"""
@@ -80,9 +98,25 @@ def create_default_config(config_path):
     print(f"✓ Configuration created: {config_path}")
     return config_data
 
+def create_session_with_retries():
+    """Create requests session with connection pooling and retries"""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 def html_to_img(url_str, resize=False):
     # Getting image from HTML page
-    resp = requests.get(url_str, stream=True).raw
+    if session is None:
+        session = requests
+    
+    resp = session.get(url_str, stream=True, timeout=30).raw
     image = np.asarray(bytearray(resp.read()), dtype="uint8")
     image = cv.imdecode(image, cv.IMREAD_COLOR)
 
@@ -147,7 +181,6 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
     
     # Initialize lists
     new_images = []
-    already_done = []
     count = 0
     
     # Set up file paths
@@ -156,20 +189,21 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
     
     # Load existing URLs
     past_result = past_list(lst_img_dir)
-    already_done.extend(past_result)
+    already_done_set = set(past_result)
     
     try:
         subreddit = reddit.subreddit(subreddit_name)
+        submissions = list(subreddit.top(limit=post_limit))
         
-        # Search for posts (keeping your existing logic)
-        for submission in subreddit.top(limit=post_limit):
+        # Search for posts
+        for submission in tqdm(submissions, desc=f"Processing r/{subreddit_name}"):
             url_str = str(submission.url.lower())
             
             # Check if it's an image with supported format
             if any(f".{fmt}" in url_str for fmt in supported_formats):
                 
                 # Check if we already have this URL
-                if url_str not in already_done:
+                if url_str not in already_done_set:
                     domain_name = submission.domain
                     
                     # Skip excluded domains
@@ -181,7 +215,7 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                             if not deleted_flag:
                                 # Add to our lists
                                 new_images.append(url_str)
-                                already_done.append(url_str)
+                                already_done_set.add(url_str)
                                 count += 1
                                 print(f"ID-{count}-Added: {url_str}")
                             else:
@@ -195,14 +229,32 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                     print(f"Already exists: {url_str}")
         
         # Save the complete list for this subreddit
-        save_urls_to_csv(already_done, lst_img_dir, f"{subreddit_name} images")
+        save_urls_to_csv(already_done_set, lst_img_dir, f"{subreddit_name} images")
         
         print(f"✓ Found {count} new images in r/{subreddit_name}")
-        return new_images, already_done
+        return new_images, already_done_set
         
     except Exception as e:
         print(f"Error accessing r/{subreddit_name}: {e}")
-        return [], already_done
+        return [], already_done_set
+
+def rate_limit(calls_per_second=1):
+    """Decorator to rate limit function calls"""
+    min_interval = 1.0 / calls_per_second
+    last_called = [0.0]
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_called[0]
+            left_to_wait = min_interval - elapsed
+            if left_to_wait > 0:
+                time.sleep(left_to_wait)
+            ret = func(*args, **kwargs)
+            last_called[0] = time.time()
+            return ret
+        return wrapper
+    return decorator
 
 def is_valid_image_url(url, supported_formats):
     """Check if URL points to a supported image format"""
@@ -212,6 +264,7 @@ def is_valid_image_url(url, supported_formats):
     except Exception:
         return False
 
+@rate_limit(calls_per_second=2)  # Max 2 requests per second
 def check_deleted_img(url_str):
     deleted_flag = False
 
@@ -376,15 +429,15 @@ def scan_subreddit_csv(subreddit_name):
     print(f"\n--- Scanning {lst_img_name} ---")
     
     # Load existing URLs
-    already_done = past_list(lst_img_dir)
-    if not already_done:
+    already_done_set = past_list(lst_img_dir)
+    if not already_done_set:
         print(f"No URLs found in {lst_img_name}")
         return 0
     
     valid_urls = []
     removed_count = 0
     
-    for i, url_str in enumerate(already_done, 1):
+    for i, url_str in enumerate(already_done_set, 1):
         try:
             deleted_flag = check_deleted_img(url_str)
             
