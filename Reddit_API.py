@@ -6,6 +6,29 @@ import requests
 import cv2 as cv
 import numpy as np
 
+# Higher number = Longer runtime
+POST_SEARCH_AMOUNT = 200
+
+"""Start Global variables"""
+dir_path = os.path.dirname(os.path.realpath(__file__))  # Path of this file
+
+past_result = []
+# already_done = []
+last_sub_url_list = []
+new_img_lst = []
+
+# lst_img_name = "Nilou_Mains_img_list.csv"
+lst_img_name = ""
+lst_img_dir = ""
+# lst_img_dir = os.path.join(dir_path, lst_img_name)
+
+lst_sub_name = "sub_list.csv"
+lst_sub_dir = os.path.join(dir_path, lst_sub_name)
+
+new_lst_img_name = "new_img.csv"
+new_lst_img_dir = os.path.join(dir_path, new_lst_img_name)
+"""End Global variables"""
+
 
 def create_folder(folder_path):  # Create directory if it doesn't exist to save images
     CHECK_FOLDER = os.path.isdir(folder_path)
@@ -15,8 +38,8 @@ def create_folder(folder_path):  # Create directory if it doesn't exist to save 
 
 
 def create_token():  # Create token file
-    client_id = "vxCV2waXGarClfnBNI8jZw"
-    secret = "Zd7IZVZRmkjKPuJCIUEgnl_dYmhXZg"
+    client_id = "rpemJuwdUD0hyAaQuqTZsw"
+    secret = "h0bUxYugWG8Oilgqh3q9YjpZgPEMZw"
     creds = {}
 
     creds["client_id"] = client_id
@@ -35,7 +58,7 @@ def read_token(dir_path):  # Read token file
     file = Path(FilePath)
 
     if file.is_file():
-        with open(FilePath, 'rb') as token:
+        with open(FilePath, "rb") as token:
             creds = pickle.load(token)
     else:
         creds = create_token()
@@ -59,8 +82,7 @@ def name_progress(url_str, sub_path, sub):
 def html_to_img(url_str, resize=False):
     # Getting image from HTML page
     resp = requests.get(url_str, stream=True).raw
-    image = np.asarray(
-        bytearray(resp.read()), dtype="uint8")
+    image = np.asarray(bytearray(resp.read()), dtype="uint8")
     image = cv.imdecode(image, cv.IMREAD_COLOR)
 
     if resize == True:
@@ -100,8 +122,9 @@ def compare_img(url_str, url_list):
             print(f"--Comparing with--{url_done}")
             difference = cv.subtract(img_1, img_2)
             b, g, r = cv.split(difference)
-            total_difference = cv.countNonZero(
-                b) + cv.countNonZero(g) + cv.countNonZero(r)
+            total_difference = (
+                cv.countNonZero(b) + cv.countNonZero(g) + cv.countNonZero(r)
+            )
             if total_difference == 0:
                 ignore_flag = True
 
@@ -130,35 +153,17 @@ def check_available(url_str, already_done):
 
 
 def Reddit_API():
-    sub = "Pixiv"   # Search for images in this Subreddit
-
-    POST_SEARCH_AMOUNT = 50
-
-    # Path of this file
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    print(dir_path)
+    sub = "Pixiv"  # Search for images in this Subreddit
 
     creds = read_token(dir_path)
 
-    reddit = Reddit(client_id=creds['client_id'],
-                    client_secret=creds['client_secret'],
-                    user_agent=creds['user_agent'],
-                    username=creds['username'],
-                    password=creds['password'])
-
-    past_result = []
-    already_done = []
-    last_sub_url_list = []
-
-    lst_sub_name = "sub_list.csv"
-    lst_sub_dir = os.path.join(dir_path, lst_sub_name)
-
-    lst_img_name = "img_list.csv"
-    lst_img_dir = os.path.join(dir_path, lst_img_name)
-
-    past_result = past_list(lst_img_dir)
-    for url in past_result:
-        already_done.append(url)
+    reddit = Reddit(
+        client_id=creds["client_id"],
+        client_secret=creds["client_secret"],
+        user_agent=creds["user_agent"],
+        username=creds["username"],
+        password=creds["password"],
+    )
 
     with open(lst_sub_dir, mode="r", encoding="utf-8-sig") as f_source:
         for line in f_source:
@@ -166,14 +171,27 @@ def Reddit_API():
             subreddit = reddit.subreddit(sub)
 
             count = 0
+            already_done = []
 
-            print(f"Starting {sub} subreddit!\n")
+            lst_img_name = f"{sub}_img_list.csv"
+            lst_img_dir = os.path.join(dir_path, lst_img_name)
+
+            past_result = past_list(lst_img_dir)
+            for url in past_result:
+                already_done.append(url)
+
+            print(f"\nStarting {sub} subreddit!\n")
 
             # Searching for Hot post
-            for submission in subreddit.hot(limit=POST_SEARCH_AMOUNT):
-                # Get image URL
+            # for submission in subreddit.hot(limit=POST_SEARCH_AMOUNT):
+            for submission in subreddit.top(
+                limit=POST_SEARCH_AMOUNT
+            ):  # Searching for Top (of all time) post
+                # Get URL from Reddit post
                 url_str = str(submission.url.lower())
+                # print(f"Test: {url_str}\n")
 
+                # Only getting Images
                 if "jpg" in url_str or "png" in url_str:
                     exist_flag = False
 
@@ -187,26 +205,25 @@ def Reddit_API():
                                 try:
                                     deleted_flag = False
 
-                                    deleted_flag = check_deleted_img(
-                                        url_str)
+                                    deleted_flag = check_deleted_img(url_str)
 
                                     if not deleted_flag:
                                         ignore_flag = False
 
-                                        ignore_flag = compare_img(
-                                            url_str, last_sub_url_list)
+                                        # ignore_flag = compare_img(url_str, last_sub_url_list)
 
                                         if not ignore_flag:
+                                            new_img_lst.append(url_str)
                                             already_done.append(url_str)
                                             count += 1
                                             print(
-                                                f"Add--successfully--{url_str}")
+                                                f"ID-{count}-Add--successfully--{url_str}"
+                                            )
                                     else:
                                         print("Deleted img")
 
                                 except Exception as e:
-                                    print(
-                                        f"Image failed. {url_str}")
+                                    print(f"Image failed. {url_str}")
                                     print(e)
 
                             else:
@@ -219,68 +236,96 @@ def Reddit_API():
 
             print(f"{count} new picture has been added!\n")
 
-    print("Finish scraping!")
+            print(f"Finish scraping {sub}!")
 
-    print("Start writing into csv file")
+            print(f"Start writing into '{new_lst_img_name}' file ")
 
-    with open(lst_img_dir, mode="w", encoding="utf-8-sig") as f_result:
-        for url_done in already_done:
-            img_path_str = str(url_done) + "\n"
-            f_result.write(img_path_str)
+            with open(new_lst_img_dir, mode="w", encoding="utf-8-sig") as f_result:
+                for url_new in new_img_lst:
+                    img_path_str = str(url_new) + "\n"
+                    f_result.write(img_path_str)
+
+            print(f"Done writing into {new_lst_img_name}!")
+
+            print(f"Start writing into '{lst_img_name}' file")
+
+            with open(lst_img_dir, mode="w", encoding="utf-8-sig") as f_result:
+                for url_done in already_done:
+                    img_path_str = str(url_done) + "\n"
+                    f_result.write(img_path_str)
+
+            print(f"Done writing into {lst_img_name}!")
 
     print("Finish running!")
 
 
 def scan_csv():
-    # Path of this file
-    dir_path = os.path.dirname(os.path.realpath(__file__))
+    # count = 0
 
-    past_result = -1
-    count = 0
     already_done = []
-    last_sub_url_list = []
 
-    lst_img_name = "img_list.csv"
-    lst_img_dir = os.path.join(dir_path, lst_img_name)
+    with open(lst_sub_dir, mode="r", encoding="utf-8-sig") as f_source:
+        for line in f_source:
+            sub = line.strip()
+            lst_img_name = f"{sub}_img_list.csv"
+            lst_img_dir = os.path.join(dir_path, lst_img_name)
 
-    past_result = past_list(lst_img_dir)
-    for url in past_result:
-        already_done.append(url)
+            id = 1
+            count = 0
 
-    for line in already_done:
-        url_str = line.strip()
-        try:
-            deleted_flag = False
+            print(f"\nStart scanning '{lst_img_name}' file!")
 
-            deleted_flag = check_deleted_img(url_str)
+            already_done = []
 
-            if not deleted_flag:
-                print(f"Keep--{url_str}")
-            else:
-                already_done.remove(line)
-                count += 1
-                print(f"Remove--{url_str}")
-        except Exception as e:
-            print(f"Image failed. {url_str}")
-            print(e)
+            past_result = past_list(lst_img_dir)
+            for url in past_result:
+                already_done.append(url)
 
-    print("\nFinish scanning!")
+            for line in already_done:
+                url_str = line.strip()
+                try:
+                    deleted_flag = False
 
-    print(f"{count} picture has been removed!\n")
+                    deleted_flag = check_deleted_img(url_str)
 
-    print("Start writing into csv file")
+                    if not deleted_flag:
+                        print(f"ID-{id}-Keep--{url_str}")
+                        id += 1
+                        # ignore_flag = False
 
-    with open(lst_img_dir, mode="w", encoding="utf-8-sig") as f_result:
-        for url_done in already_done:
-            img_path_str = str(url_done) + "\n"
-            f_result.write(img_path_str)
+                        # ignore_flag = compare_img(url_str, already_done)
+
+                        # if ignore_flag:
+                        #     already_done.remove(line)
+                        #     count += 1
+                        #     print(f"Remove--{url_str}")
+                    else:
+                        already_done.remove(line)
+                        count += 1
+                        print(f"Remove--{url_str}")
+                except Exception as e:
+                    print(f"Image failed. {url_str}")
+                    print(e)
+
+            print(f"Finish scanning {lst_img_name}!")
+
+            print(f"{count} picture has been removed!\n")
+
+            print("Start writing into csv file")
+
+            with open(lst_img_dir, mode="w", encoding="utf-8-sig") as f_result:
+                for url_done in already_done:
+                    img_path_str = str(url_done) + "\n"
+                    f_result.write(img_path_str)
+
+            print("Finish writing into csv file")
 
     print("Finish running!")
 
 
 def main():
     Reddit_API()
-    scan_csv()
+    # scan_csv()
 
 
 if __name__ == "__main__":
