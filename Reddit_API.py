@@ -111,7 +111,7 @@ def create_session_with_retries():
     session.mount("https://", adapter)
     return session
 
-def html_to_img(url_str, resize=False):
+def html_to_img(url_str, session=None, resize=False):
     # Getting image from HTML page
     if session is None:
         session = requests
@@ -173,7 +173,10 @@ def read_subreddit_list(file_path):
 def process_subreddit(reddit, subreddit_name, config, dir_path):
     """Process a single subreddit and return new images found"""
     print(f"\n--- Processing r/{subreddit_name} ---")
-    
+
+    # Create session for this subreddit
+    session = create_session_with_retries()
+
     # Get configuration values
     post_limit = config["scraping_settings"]["post_limit"]
     supported_formats = config["scraping_settings"]["supported_formats"]
@@ -210,7 +213,7 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                     if domain_name not in excluded_domains:
                         try:
                             # Check if image is deleted
-                            deleted_flag = check_deleted_img(url_str)
+                            deleted_flag = check_deleted_img(url_str, session)
                             
                             if not deleted_flag:
                                 # Add to our lists
@@ -265,10 +268,10 @@ def is_valid_image_url(url, supported_formats):
         return False
 
 @rate_limit(calls_per_second=2)  # Max 2 requests per second
-def check_deleted_img(url_str):
+def check_deleted_img(url_str, session=None):
     deleted_flag = False
 
-    img = html_to_img(url_str)
+    img = html_to_img(url_str, session)
     [h, w] = [img.shape[0], img.shape[1]]
 
     if [h, w] != [60, 130]:
@@ -319,6 +322,9 @@ def compare_img(url_str, url_list):
 
 def save_urls_to_csv(urls, file_path, description="URLs"):
     """Save URLs to CSV file with error handling"""
+    if isinstance(urls, set):
+        urls = list(urls)
+    
     if not urls:
         print(f"No {description.lower()} to save")
         return True
@@ -360,14 +366,16 @@ def past_list(lst_img_dir):
 
 def Reddit_API():
     """Main scraping function"""
-    print("Starting Reddit Image Scraper...")
-    
     # Load configuration
     config = load_config(dir_path)  # Use your updated config function
     if not config:
         print("Failed to load configuration. Exiting...")
         return
-    
+
+    # Setup logging after config is loaded
+    logger = setup_logging(config)
+    logger.info("Starting Reddit Image Scraper...")
+
     # Create Reddit client
     reddit = create_reddit_client(config["reddit_credentials"])
     if not reddit:
