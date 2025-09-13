@@ -18,13 +18,6 @@ new_lst_img_dir = os.path.join(dir_path, new_lst_img_name)
 """End Global variables"""
 
 
-def create_folder(folder_path):  # Create directory if it doesn't exist to save images
-    CHECK_FOLDER = os.path.isdir(folder_path)
-    # If folder doesn't exist, then create it.
-    if not CHECK_FOLDER:
-        os.makedirs(folder_path)
-
-
 def create_token():
     """Create credentials by getting input from user"""
     creds = {}
@@ -86,18 +79,6 @@ def create_default_config(config_path):
     
     print(f"✓ Configuration created: {config_path}")
     return config_data
-
-
-def name_progress(url_str, sub_path, sub):
-    url_name_lst = url_str.split("/")
-    pic_name = url_name_lst[3]
-    pic_name_lst = pic_name.split(".")
-    pic_id = pic_name_lst[0]
-    pic_type = pic_name_lst[1]
-
-    img_name = f"{sub_path}{sub}-{pic_id}.{pic_type}"
-    img_path = os.path.join(sub_path, img_name)
-
 
 def html_to_img(url_str, resize=False):
     # Getting image from HTML page
@@ -231,7 +212,6 @@ def is_valid_image_url(url, supported_formats):
     except Exception:
         return False
 
-
 def check_deleted_img(url_str):
     deleted_flag = False
 
@@ -324,16 +304,6 @@ def past_list(lst_img_dir):
         print(f"Error reading {lst_img_dir}: {e}")
     
     return past_urls
-
-
-def check_available(url_str, already_done):
-    exist_flag = False
-
-    for url_done in already_done:
-        if url_str == url_done:
-            exist_flag = True
-
-    return exist_flag
 
 def Reddit_API():
     """Main scraping function"""
