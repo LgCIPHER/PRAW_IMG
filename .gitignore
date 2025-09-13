@@ -1,5 +1,5 @@
 config.txt
 reddit_config.json
 .env
-token.pickle
+.vscode
 *.csv

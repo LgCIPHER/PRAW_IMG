@@ -1,13 +1,10 @@
 from praw import Reddit
 import os.path
 from pathlib import Path
-import pickle
+import json
 import requests
 import cv2 as cv
 import numpy as np
-
-# Higher number = Longer runtime
-POST_SEARCH_AMOUNT = 200
 
 """Start Global variables"""
 dir_path = os.path.dirname(os.path.realpath(__file__))  # Path of this file
@@ -37,35 +34,67 @@ def create_folder(folder_path):  # Create directory if it doesn't exist to save 
         os.makedirs(folder_path)
 
 
-def create_token():  # Create token file
-    client_id = "rpemJuwdUD0hyAaQuqTZsw"
-    secret = "h0bUxYugWG8Oilgqh3q9YjpZgPEMZw"
+def create_token():
+    """Create credentials by getting input from user"""
     creds = {}
-
-    creds["client_id"] = client_id
-    creds["client_secret"] = secret
-    creds["user_agent"] = input("user_agent: ")
-    creds["username"] = input("username: ")
-    creds["password"] = input("password: ")
-
+    print("Setting up Reddit API credentials...")
+    print("(You can find these at: https://www.reddit.com/prefs/apps)")
+    
+    creds["client_id"] = input("Enter your Reddit client_id: ")
+    creds["client_secret"] = input("Enter your Reddit client_secret: ")
+    creds["user_agent"] = input("Enter your user_agent (e.g., MyBot/1.0): ")
+    creds["username"] = input("Enter your Reddit username: ")
+    creds["password"] = input("Enter your Reddit password: ")
+    
     return creds
 
 
-def read_token(dir_path):  # Read token file
-    # Token file directory
-    FilePath = os.path.join(dir_path, "token.pickle")
-
-    file = Path(FilePath)
-
-    if file.is_file():
-        with open(FilePath, "rb") as token:
-            creds = pickle.load(token)
-    else:
+def read_token(dir_path):
+    """Read credentials from JSON config file"""
+    config_path = os.path.join(dir_path, "reddit_config.json")
+    
+    try:
+        # Try to read existing config file
+        with open(config_path, 'r') as config_file:
+            config_data = json.load(config_file)
+            print("✓ Loaded credentials from reddit_config.json")
+            return config_data["reddit_credentials"]
+            
+    except FileNotFoundError:
+        print("reddit_config.json not found. Creating new config...")
+        
+        # Get credentials from user
         creds = create_token()
-        pickle_out = open("token.pickle", "wb")
-        pickle.dump(creds, pickle_out)
-
-    return creds
+        
+        # Create full config structure with your current settings
+        config_data = {
+            "reddit_credentials": creds,
+            "scraping_settings": {
+                "post_limit": 50,
+                "default_subreddit": "Pixiv",
+                "supported_formats": ["jpg", "png"],
+                "exclude_domains": ["i.imgur.com"]
+            }
+        }
+        
+        # Save to JSON file
+        try:
+            with open(config_path, 'w') as config_file:
+                json.dump(config_data, config_file, indent=4)
+            print(f"✓ Config file created: {config_path}")
+            print("✓ Your credentials are now saved securely!")
+            return creds
+        except Exception as e:
+            print(f"Error creating config file: {e}")
+            return creds
+    
+    except json.JSONDecodeError:
+        print("Error: reddit_config.json file is corrupted")
+        print("Please delete it and run the script again")
+        return None
+    except Exception as e:
+        print(f"Error reading config file: {e}")
+        return None
 
 
 def name_progress(url_str, sub_path, sub):
@@ -153,9 +182,15 @@ def check_available(url_str, already_done):
 
 
 def Reddit_API():
+    # Higher number = Longer runtime
+    POST_SEARCH_AMOUNT = 20
+    
     sub = "Pixiv"  # Search for images in this Subreddit
 
     creds = read_token(dir_path)
+    if not creds:
+        print("Failed to load credentials. Exiting...")
+        return
 
     reddit = Reddit(
         client_id=creds["client_id"],
