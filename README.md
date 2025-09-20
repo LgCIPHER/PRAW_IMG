@@ -1,15 +1,18 @@
 # Reddit Image Scraper
 
-A Python script that downloads image URLs from specified Reddit subreddits and saves them to CSV files for further analysis or processing.
+A Python script that efficiently scrapes image URLs from specified Reddit subreddits, with progress tracking and comprehensive validation, saving them to CSV files for further analysis or processing.
 
 ## Features
 
-- Scrapes image URLs from multiple subreddits
-- Filters for specific image formats (JPG, PNG)
-- Removes deleted images automatically
-- Prevents duplicate image collection
-- Exports results to CSV files (Excel-compatible)
-- Secure credential management via JSON config
+- Scrapes image URLs from multiple subreddits with progress visualization
+- Filters for specific image formats (JPG, PNG, JPEG)
+- Advanced duplicate detection and removal
+- Automatic deleted image detection and filtering
+- Domain-based filtering (configurable excluded domains)
+- Progress bars for real-time scraping status
+- Excel-compatible CSV output with proper encoding
+- Secure credential and configuration management via JSON
+- Bulk CSV cleanup and maintenance tools
 
 ## Requirements
 
@@ -57,7 +60,7 @@ DigitalPainting
 
 ### Configuration File Structure
 
-The script creates a `reddit_config.json` file:
+The script creates a `reddit_config.json` file with comprehensive settings:
 
 ```json
 {
@@ -69,9 +72,21 @@ The script creates a `reddit_config.json` file:
     "password": "your_password"
   },
   "scraping_settings": {
-    "post_limit": 50,
-    "default_subreddit": "Pixiv",
-    "supported_formats": ["jpg", "png"]
+    "post_limit": 20,
+    "search_type": "top",
+    "supported_formats": ["jpg", "png", "jpeg"],
+    "excluded_domains": ["i.imgur.com"],
+    "enable_duplicate_detection": true,
+    "enable_deleted_image_check": true
+  },
+  "performance_settings": {
+    "request_timeout_seconds": 30,
+    "retry_attempts": 5,
+    "rate_limit_delay": 1.0
+  },
+  "output_settings": {
+    "csv_encoding": "utf-8-sig",
+    "summary_filename": "new_img.csv"
   }
 }
 ```
@@ -86,12 +101,30 @@ python Reddit_API.py
 
 ### What the Script Does
 
-1. Reads subreddit names from `sub_list.csv`
-2. For each subreddit, scrapes the top posts for image URLs
-3. Validates images (removes deleted/broken links)
-4. Filters out duplicates within the same subreddit
-5. Saves results to individual CSV files: `{subreddit}_img_list.csv`
-6. Creates a summary file: `new_img.csv` with newly found images
+The script offers three main operation modes:
+
+1. **Scrape New Images**
+
+   - Reads subreddit names from `sub_list.csv`
+   - Connects to Reddit using secure credentials
+   - For each subreddit:
+     - Scrapes top posts with progress visualization
+     - Validates images and checks for deletions
+     - Filters by supported formats and domains
+     - Detects and removes duplicates
+   - Saves to individual CSV files: `{subreddit}_img_list.csv`
+   - Creates a summary file: `new_img.csv`
+
+2. **Clean Existing CSVs**
+
+   - Scans all existing subreddit CSV files
+   - Checks each URL for validity and accessibility
+   - Removes broken or deleted image links
+   - Updates CSV files with clean data
+
+3. **Combined Operation**
+   - Performs both scraping and cleaning in sequence
+   - Ensures completely clean and up-to-date results
 
 ### Output Files
 
@@ -101,26 +134,61 @@ python Reddit_API.py
 
 ## Functions
 
-### Main Functions
+### Key Functions
 
-- `Reddit_API()` - Main scraping function that processes all subreddits
-- `scan_csv()` - Validates existing CSV files and removes broken links
+#### Core Functions
 
-### Utility Functions
+- `main()` - Entry point with interactive mode selection
+- `Reddit_API()` - Main scraping function with progress tracking
+- `scan_csv()` - CSV file maintenance and cleanup
 
-- `create_token()` - Handles credential input during first setup
-- `read_token()` - Loads credentials from JSON config file
-- `check_deleted_img()` - Validates if image URLs are still accessible
-- `compare_img()` - Compares images to detect duplicates
-- `past_list()` - Loads previously scraped URLs from CSV files
+#### Configuration Management
 
-## Settings
+- `create_token()` - Interactive credential setup
+- `load_config()` - Loads or creates configuration
+- `create_default_config()` - Generates default configuration
 
-You can modify these variables in the script:
+#### Subreddit Processing
 
-- `POST_SEARCH_AMOUNT` - Number of posts to check per subreddit (default: 200)
-- Image formats - Currently supports JPG and PNG
-- Domain filtering - Currently excludes i.imgur.com links
+- `process_subreddit()` - Handles individual subreddit scraping
+- `read_subreddit_list()` - Loads and validates subreddit names
+- `scan_subreddit_csv()` - Cleans individual subreddit files
+
+#### Image Processing
+
+- `check_deleted_img()` - Validates image accessibility
+- `safe_check_deleted_img()` - Robust image checking with retries
+- `compare_img()` - OpenCV-based image comparison
+- `html_to_img()` - Converts URL to image array
+
+#### File Operations
+
+- `save_urls_to_csv()` - Writes URLs with error handling
+- `past_list()` - Loads existing URLs with validation
+
+## Configuration Options
+
+All settings are managed through `reddit_config.json`:
+
+### Scraping Settings
+
+- `post_limit` - Number of posts to check per subreddit (default: 20)
+- `search_type` - Post sorting method (default: "top")
+- `supported_formats` - Image formats to collect (jpg, png, jpeg)
+- `excluded_domains` - Domains to skip (e.g., ["i.imgur.com"])
+- `enable_duplicate_detection` - Compare images for duplicates
+- `enable_deleted_image_check` - Verify image accessibility
+
+### Performance Settings
+
+- `request_timeout_seconds` - HTTP request timeout
+- `retry_attempts` - Number of retries for failed requests
+- `rate_limit_delay` - Delay between requests to avoid rate limiting
+
+### Output Settings
+
+- `csv_encoding` - File encoding for CSV files
+- `summary_filename` - Name of the combined results file
 
 ## Security Notes
 
@@ -150,16 +218,33 @@ The CSV files are formatted for easy import into Excel:
 
 ## Troubleshooting
 
-### Common Issues
+### Common Issues and Solutions
 
-- **"Failed to load credentials"** - Run the script to create initial config file
-- **"Image failed"** - Network issues or broken image links (automatically skipped)
-- **Rate limiting** - Reddit may temporarily limit requests if too frequent
+#### Authentication Issues
 
-### Maintenance
+- **"Failed to connect to Reddit API"** - Verify credentials in config file
+- **"NoneType object has no attribute 'name'"** - Check Reddit password and permissions
+- **Rate limiting** - Adjust `rate_limit_delay` in config if encountering limits
 
-- Run `scan_csv()` function periodically to clean up broken links
-- Check CSV files for any URLs that may have become inaccessible
+#### Data Issues
+
+- **"Failed to check image"** - Network issues or deleted images (auto-retried)
+- **Duplicate images** - Enable `enable_duplicate_detection` in config
+- **Missing files** - Create required CSV files before running
+
+### Best Practices
+
+#### Regular Maintenance
+
+- Use option 2 or 3 in the menu to run cleanup regularly
+- Monitor CSV files for growing size and duplicates
+- Adjust performance settings based on your network conditions
+
+#### Performance Optimization
+
+- Set appropriate `post_limit` based on your needs
+- Configure `retry_attempts` and `request_timeout_seconds` for reliability
+- Use `rate_limit_delay` to balance speed and stability
 
 ## Contributing
 

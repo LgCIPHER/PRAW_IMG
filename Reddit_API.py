@@ -170,9 +170,27 @@ def read_subreddit_list(file_path):
     
     return subreddits
 
+def should_create_subreddit_file(subreddit_name, file_path):
+    """Ask user if they want to create a new CSV file for a subreddit"""
+    while True:
+        response = input(f"\nCSV file not found for r/{subreddit_name}.\nDo you want to create {os.path.basename(file_path)} and start scraping? (y/n): ").lower().strip()
+        if response in ['y', 'n']:
+            return response == 'y'
+        print("Please enter 'y' for yes or 'n' for no.")
+
 def process_subreddit(reddit, subreddit_name, config, dir_path):
     """Process a single subreddit and return new images found"""
     print(f"\n--- Processing r/{subreddit_name} ---")
+
+    # Set up file paths
+    lst_img_name = f"{subreddit_name}_img_list.csv"
+    lst_img_dir = os.path.join(dir_path, lst_img_name)
+
+    # Check if CSV file exists
+    if not os.path.exists(lst_img_dir):
+        if not should_create_subreddit_file(subreddit_name, lst_img_dir):
+            print(f"Skipping r/{subreddit_name}...")
+            return [], [], set()
 
     # Create session for this subreddit
     session = create_session_with_retries()
@@ -198,8 +216,16 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
         subreddit = reddit.subreddit(subreddit_name)
         submissions = list(subreddit.top(limit=post_limit))
         
+        # Initialize list to store post data
+        new_posts_data = []
+        
         # Search for posts
-        for submission in tqdm(submissions, desc=f"Processing r/{subreddit_name}\n"):
+        for submission in tqdm(submissions, 
+                      desc=f"Processing r/{subreddit_name}",
+                      total=len(submissions),
+                      unit="post",
+                      colour="green",
+                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} posts [{elapsed}<{remaining}]\n"):
             url_str = str(submission.url.lower())
             
             # Check if it's an image with supported format
@@ -216,7 +242,16 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                             deleted_flag = check_deleted_img(url_str, session)
                             
                             if not deleted_flag:
+                                # Create post data dictionary with sequential numbering
+                                post_data = {
+                                    'id': count + 1,  # Use count + 1 for 1-based indexing
+                                    'subreddit_name': subreddit_name,
+                                    'post_title': submission.title,
+                                    'reddit_link': url_str
+                                }
+                                
                                 # Add to our lists
+                                new_posts_data.append(post_data)
                                 new_images.append(url_str)
                                 already_done_set.add(url_str)
                                 count += 1
@@ -231,11 +266,12 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                 else:
                     print(f"Already exists: {url_str}")
         
-        # Save the complete list for this subreddit
-        save_urls_to_csv(already_done_set, lst_img_dir, f"{subreddit_name} images")
+        # Save only the new posts to the subreddit's file
+        if new_posts_data:
+            save_urls_to_csv(new_posts_data, lst_img_dir, f"new {subreddit_name} images", append=True)
         
         print(f"✓ Found {count} new images in r/{subreddit_name}")
-        return new_images, already_done_set
+        return new_posts_data, new_images, already_done_set
         
     except Exception as e:
         print(f"Error accessing r/{subreddit_name}: {e}")
@@ -320,20 +356,33 @@ def compare_img(url_str, url_list):
 
     return ignore_flag
 
-def save_urls_to_csv(urls, file_path, description="URLs"):
-    """Save URLs to CSV file with error handling"""
-    if isinstance(urls, set):
-        urls = list(urls)
+def save_urls_to_csv(data, file_path, description="URLs", append=False):
+    """Save URLs to CSV file with multiple columns
     
-    if not urls:
+    Args:
+        data: List of dictionaries containing post information
+        file_path: Path to save the CSV file
+        description: Description of the data being saved
+        append: If True, append to existing file; if False, overwrite
+    """
+    if not data:
         print(f"No {description.lower()} to save")
         return True
     
     try:
-        with open(file_path, mode="w", encoding="utf-8-sig") as f:
-            for url in urls:
-                f.write(f"{url}\n")
-        print(f"✓ Saved {len(urls)} {description.lower()} to {os.path.basename(file_path)}")
+        import csv
+        headers = ['id', 'subreddit_name', 'post_title', 'reddit_link']
+        
+        mode = "a" if append and os.path.exists(file_path) else "w"
+        write_header = mode == "w" or not os.path.exists(file_path)
+        
+        with open(file_path, mode=mode, encoding="utf-8-sig", newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            if write_header:
+                writer.writeheader()
+            writer.writerows(data)
+            
+        print(f"✓ Saved {len(data)} {description.lower()} to {os.path.basename(file_path)}")
         return True
     except Exception as e:
         print(f"Error saving {description.lower()} to {file_path}: {e}")
@@ -341,7 +390,8 @@ def save_urls_to_csv(urls, file_path, description="URLs"):
 
 def past_list(lst_img_dir):
     """Read URLs from existing CSV file with error handling"""
-    past_urls = []
+    past_data = []
+    past_urls = set()  # Use set for faster lookup
     
     # Check if file exists first
     if not os.path.exists(lst_img_dir):
@@ -349,11 +399,14 @@ def past_list(lst_img_dir):
         return past_urls
     
     try:
+        import csv
         with open(lst_img_dir, mode="r", encoding="utf-8-sig") as f_past_result:
-            for line_num, line in enumerate(f_past_result, 1):
-                url = line.strip()
-                if url and not url.startswith('#'):  # Skip empty lines and comments
-                    past_urls.append(url)
+            reader = csv.DictReader(f_past_result)
+            for row in reader:
+                if row.get('reddit_link'):  # Get URL from the reddit_link column
+                    past_data.append(row)
+                    past_urls.add(row['reddit_link'])
+                    
         print(f"✓ Loaded {len(past_urls)} existing URLs from {os.path.basename(lst_img_dir)}")
     except FileNotFoundError:
         print(f"File not found: {lst_img_dir}")
@@ -362,7 +415,7 @@ def past_list(lst_img_dir):
     except Exception as e:
         print(f"Error reading {lst_img_dir}: {e}")
     
-    return past_urls
+    return past_urls  # Return just the set of URLs for checking duplicates
 
 def Reddit_API():
     """Main scraping function"""
@@ -380,6 +433,8 @@ def Reddit_API():
     reddit = create_reddit_client(config["reddit_credentials"])
     if not reddit:
         return
+        
+    print("\nNote: For any new subreddits without existing CSV files, you will be prompted to confirm creation.")
     
     # Get list of subreddits to process
     subreddits_to_process = read_subreddit_list(lst_sub_dir)
@@ -388,19 +443,25 @@ def Reddit_API():
         return
     
     # Process all subreddits
+    all_new_posts_data = []
     all_new_images = []
     total_processed = 0
     
     for subreddit_name in subreddits_to_process:
-        new_images, all_images = process_subreddit(reddit, subreddit_name, config, dir_path)
+        new_posts_data, new_images, all_images = process_subreddit(reddit, subreddit_name, config, dir_path)
+        all_new_posts_data.extend(new_posts_data)
         all_new_images.extend(new_images)
         total_processed += len(new_images)
     
     # Save summary file with all new images
-    if all_new_images:
+    if all_new_posts_data:
+        # Renumber entries in the summary file
+        for i, post_data in enumerate(all_new_posts_data, 1):
+            post_data['id'] = i
+            
         summary_filename = config["output_settings"]["summary_filename"]
         summary_path = os.path.join(dir_path, summary_filename)
-        save_urls_to_csv(all_new_images, summary_path, "new images summary")
+        save_urls_to_csv(all_new_posts_data, summary_path, "new images summary")
     
     # Final summary
     print(f"\n{'='*50}")

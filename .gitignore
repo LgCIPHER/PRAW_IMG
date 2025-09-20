@@ -2,4 +2,5 @@ reddit_config.json
 .env
 .vscode
 *.csv
+*.sql
 *.log
