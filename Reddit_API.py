@@ -199,7 +199,7 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
         submissions = list(subreddit.top(limit=post_limit))
         
         # Search for posts
-        for submission in tqdm(submissions, desc=f"Processing r/{subreddit_name}"):
+        for submission in tqdm(submissions, desc=f"Processing r/{subreddit_name}\n"):
             url_str = str(submission.url.lower())
             
             # Check if it's an image with supported format
