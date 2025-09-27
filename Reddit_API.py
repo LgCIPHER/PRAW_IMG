@@ -25,6 +25,43 @@ new_lst_img_name = "new_img.csv"
 new_lst_img_dir = os.path.join(dir_path, new_lst_img_name)
 """End Global variables"""
 
+def retry_reddit_api(func):
+    """Decorator for Reddit API calls with retry logic"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise
+                logging.warning(f"Reddit API call failed, retrying in {retry_delay} seconds: {e}")
+                time.sleep(retry_delay)
+    return wrapper
+
+class ImageValidator:
+    """Utility class for image validation"""
+    @staticmethod
+    def is_valid_format(url: str, supported_formats: List[str]) -> bool:
+        """Check if URL points to a supported image format"""
+        try:
+            url_lower = url.lower()
+            return any(f".{fmt}" in url_lower for fmt in supported_formats)
+        except Exception:
+            return False
+    
+    @staticmethod
+    def check_image_size(image: np.ndarray, min_size_bytes: int) -> bool:
+        """Check if image meets minimum size requirements"""
+        try:
+            image_size = image.nbytes
+            return image_size >= min_size_bytes
+        except Exception:
+            return False
+
 def setup_logging(config):
     """Setup logging configuration"""
     log_level = config.get("output_settings", {}).get("log_level", "INFO")
@@ -80,16 +117,24 @@ def create_default_config(config_path):
             "supported_formats": ["jpg", "png", "jpeg"],
             "excluded_domains": ["i.imgur.com"],
             "enable_duplicate_detection": True,
-            "enable_deleted_image_check": True
+            "enable_deleted_image_check": True,
+            "batch_size": 10,
+            "min_image_size": 10240  # 10KB minimum size
         },
         "performance_settings": {
             "request_timeout_seconds": 30,
             "retry_attempts": 3,
-            "rate_limit_delay": 1.0
+            "rate_limit_delay": 1.0,
+            "max_workers": 4,
+            "max_memory_mb": 500,
+            "reddit_api_retries": 3,
+            "reddit_api_retry_delay": 5
         },
         "output_settings": {
             "csv_encoding": "utf-8-sig",
-            "summary_filename": "new_img.csv"
+            "summary_filename": "new_img.csv",
+            "log_level": "INFO",
+            "save_error_logs": True
         }
     }
     
@@ -182,7 +227,8 @@ def should_create_subreddit_file(subreddit_name, file_path):
 
 def process_subreddit(reddit, subreddit_name, config, dir_path):
     """Process a single subreddit and return new images found"""
-    print(f"\n--- Processing r/{subreddit_name} ---")
+    logger = logging.getLogger(__name__)
+    logger.info(f"Starting processing of r/{subreddit_name}")
 
     # Set up file paths
     lst_img_name = f"{subreddit_name}_img_list.csv"
@@ -191,16 +237,21 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
     # Check if CSV file exists
     if not os.path.exists(lst_img_dir):
         if not should_create_subreddit_file(subreddit_name, lst_img_dir):
-            print(f"Skipping r/{subreddit_name}...")
+            logger.info(f"Skipping r/{subreddit_name} as per user choice")
             return [], [], set()
 
-    # Create session for this subreddit
-    session = create_session_with_retries()
-
     # Get configuration values
-    post_limit = config["scraping_settings"]["post_limit"]
-    supported_formats = config["scraping_settings"]["supported_formats"]
-    excluded_domains = config["scraping_settings"]["excluded_domains"]
+    scraping_settings = config["scraping_settings"]
+    performance_settings = config["performance_settings"]
+    
+    post_limit = scraping_settings["post_limit"]
+    supported_formats = scraping_settings["supported_formats"]
+    excluded_domains = scraping_settings["excluded_domains"]
+    min_image_size = scraping_settings.get("min_image_size", 10240)  # 10KB default
+    batch_size = scraping_settings.get("batch_size", 10)
+
+    # Create session with retry logic
+    session = create_session_with_retries()
     
     # Initialize lists
     new_images = []
@@ -215,13 +266,17 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
     already_done_set = set(past_result)
     
     try:
+        # Get subreddit and create submission generator
         subreddit = reddit.subreddit(subreddit_name)
         submissions = list(subreddit.top(limit=post_limit))
         
-        # Initialize list to store post data
+        # Initialize tracking variables
         new_posts_data = []
+        new_images = []
+        processed_count = 0
+        batch = []
         
-        # Search for posts
+        # Process submissions in batches
         for submission in tqdm(submissions, 
                       desc=f"Processing r/{subreddit_name}",
                       total=len(submissions),
@@ -240,39 +295,54 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
                     # Skip excluded domains
                     if domain_name not in excluded_domains:
                         try:
-                            # Check if image is deleted
+                            # Validate image
+                            img = html_to_img(url_str, session)
+                            
+                            # Check image validity
+                            if not ImageValidator.check_image_size(img, min_image_size):
+                                logger.warning(f"Image too small: {url_str}")
+                                continue
+                                
                             deleted_flag = check_deleted_img(url_str, session)
                             
                             if not deleted_flag:
-                                # Create post data dictionary with sequential numbering
+                                # Create post data dictionary
                                 post_data = {
-                                    'id': count + 1,  # Use count + 1 for 1-based indexing
+                                    'id': count + 1,
                                     'subreddit_name': subreddit_name,
                                     'post_title': submission.title,
                                     'reddit_link': url_str
                                 }
                                 
-                                # Add to our lists
-                                new_posts_data.append(post_data)
+                                # Add to batch
+                                batch.append(post_data)
                                 new_images.append(url_str)
                                 already_done_set.add(url_str)
                                 count += 1
-                                print(f"ID-{count}-Added: {url_str}")
+                                logger.info(f"Added: {url_str}")
+                                
+                                # Process batch if full
+                                if len(batch) >= batch_size:
+                                    new_posts_data.extend(batch)
+                                    if new_posts_data:
+                                        save_urls_to_csv(batch, lst_img_dir, f"batch {subreddit_name}", append=True)
+                                    batch = []
                             else:
-                                print(f"Skipped deleted image: {url_str}")
+                                logger.info(f"Skipped deleted image: {url_str}")
                                 
                         except Exception as e:
-                            print(f"Error processing {url_str}: {e}")
+                            logger.error(f"Error processing {url_str}: {e}")
                     else:
-                        print(f"Skipped excluded domain: {domain_name}")
+                        logger.info(f"Skipped excluded domain: {domain_name}")
                 else:
-                    print(f"Already exists: {url_str}")
+                    logger.debug(f"Already exists: {url_str}")
         
-        # Save only the new posts to the subreddit's file
-        if new_posts_data:
-            save_urls_to_csv(new_posts_data, lst_img_dir, f"new {subreddit_name} images", append=True)
+        # Process remaining batch
+        if batch:
+            new_posts_data.extend(batch)
+            save_urls_to_csv(batch, lst_img_dir, f"final batch {subreddit_name}", append=True)
         
-        print(f"✓ Found {count} new images in r/{subreddit_name}")
+        logger.info(f"Found {count} new images in r/{subreddit_name}")
         return new_posts_data, new_images, already_done_set
         
     except Exception as e:
