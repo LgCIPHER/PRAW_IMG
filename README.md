@@ -175,6 +175,7 @@ project/
 ├── {subreddit}_img_list.csv  # Results for each subreddit
 ├── new_img.csv            # Latest scraping results
 └── .gitignore            # Git ignore configuration
+```
 
 ## Security Notes
 
@@ -289,4 +290,3 @@ The CSV files are formatted for easy import into Excel:
 ## Contributing
 
 Feel free to submit issues or pull requests to improve the functionality.
-```
