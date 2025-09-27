@@ -10,21 +10,33 @@ from dataclasses import dataclass
 from typing import List
 import time
 from functools import wraps
+from .image_hash import ImageHashProcessor, HashComparisonResult
 
 @dataclass
 class ImageValidationResult:
     """Result of image validation"""
     is_valid: bool
     is_deleted: bool
-    error_message: Optional[str] = None
+    is_similar: bool = False
+    similar_to: Optional[str] = None
+    hash_difference: Optional[int] = None
+    message: Optional[str] = None
 
 class ImageProcessor:
     """Handles image downloading and validation"""
     
-    def __init__(self, min_size_bytes: int = 10240):
+    def __init__(self, min_size_bytes: int = 10240, hash_config: Optional[dict] = None):
         self.min_size_bytes = min_size_bytes
         self.session = None
         self.logger = logging.getLogger(__name__)
+        self.hash_processor = None
+        
+        # Initialize hash processor if config is provided
+        if hash_config is not None:
+            self.hash_processor = ImageHashProcessor(
+                hash_file=hash_config["hash_file"],
+                hash_threshold=hash_config["hash_threshold"]
+            )
 
     async def __aenter__(self):
         """Set up async context"""
@@ -79,20 +91,57 @@ class ImageProcessor:
         try:
             image = await self.download_image(url)
             if image is None:
-                return ImageValidationResult(False, True, "Failed to download image")
+                return ImageValidationResult(
+                    is_valid=False, 
+                    is_deleted=True,
+                    message="Failed to download image"
+                )
 
             # Check if image is deleted (60x130 is Reddit's deleted image size)
             if image.shape[0] == 60 and image.shape[1] == 130:
-                return ImageValidationResult(False, True, "Image is deleted")
+                return ImageValidationResult(
+                    is_valid=False, 
+                    is_deleted=True,
+                    message="Image is deleted"
+                )
 
             # Check minimum size
             if not self._check_image_size(image):
-                return ImageValidationResult(False, False, "Image too small")
+                return ImageValidationResult(
+                    is_valid=False, 
+                    is_deleted=False,
+                    message="Image too small"
+                )
 
-            return ImageValidationResult(True, False)
+            # Perform hash comparison if enabled
+            if self.hash_processor:
+                async with self.hash_processor:
+                    hash_result = await self.hash_processor.compare_image(url)
+                    if hash_result.is_similar:
+                        return ImageValidationResult(
+                            is_valid=False,
+                            is_deleted=False,
+                            is_similar=True,
+                            similar_to=hash_result.similar_to,
+                            hash_difference=hash_result.hash_difference,
+                            message=f"Similar to existing image (difference: {hash_result.hash_difference})"
+                        )
+                    
+                    # Add hash to database for valid images
+                    await self.hash_processor.add_image_hash(url)
+
+            return ImageValidationResult(
+                is_valid=True, 
+                is_deleted=False,
+                message="Image is valid"
+            )
 
         except Exception as e:
-            return ImageValidationResult(False, False, str(e))
+            return ImageValidationResult(
+                is_valid=False, 
+                is_deleted=False,
+                message=str(e)
+            )
 
     def _check_image_size(self, image: np.ndarray) -> bool:
         """Check if image meets minimum size requirements"""

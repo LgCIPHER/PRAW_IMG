@@ -7,6 +7,14 @@ from typing import List, Dict, Optional
 import logging
 
 @dataclass
+class HashConfig:
+    """Configuration for image hash comparison settings"""
+    enable_hash_comparison: bool = True
+    hash_file: str = "image_hashes.json"
+    hash_threshold: int = 5
+    hash_type: str = "average"  # can be "average", "perceptual", "difference", or "wavelet"
+
+@dataclass
 class ScrapingConfig:
     """Configuration for scraping settings"""
     post_limit: int = 20
@@ -17,6 +25,7 @@ class ScrapingConfig:
     enable_deleted_image_check: bool = True
     batch_size: int = 10
     min_image_size: int = 10240  # 10KB minimum size
+    hash_config: HashConfig = field(default_factory=HashConfig)
 
 @dataclass
 class PerformanceConfig:

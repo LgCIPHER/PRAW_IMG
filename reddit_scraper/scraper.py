@@ -24,7 +24,8 @@ class ScrapingStats:
         'wrong_format': 0,
         'duplicate': 0,
         'excluded_domain': 0,
-        'deleted': 0
+        'deleted': 0,
+        'similar': 0
     })
 
 class RedditImageScraper:
@@ -156,8 +157,17 @@ class RedditImageScraper:
             new_posts = []
             post_id = len(existing_urls) + 1
             
+            # Only pass hash config if hash comparison is enabled
+            hash_config = None
+            if self.config_manager.scraping_config.hash_config.enable_hash_comparison:
+                hash_config = {
+                    "hash_file": self.config_manager.scraping_config.hash_config.hash_file,
+                    "hash_threshold": self.config_manager.scraping_config.hash_config.hash_threshold
+                }
+            
             async with ImageProcessor(
-                self.config_manager.scraping_config.min_image_size) as img_processor:
+                self.config_manager.scraping_config.min_image_size,
+                hash_config=hash_config) as img_processor:
                 for submission in tqdm(candidate_submissions,
                                      desc=f"Processing r/{subreddit_name}",
                                      unit="post"):
@@ -176,6 +186,14 @@ class RedditImageScraper:
                         self.stats.total_new_images += 1
                     elif result.is_deleted:
                         self.stats.skipped_stats['deleted'] += 1
+                        self.logger.info(f"Skipped deleted image: {submission.url}")
+                    elif result.is_similar:
+                        self.stats.skipped_stats['similar'] += 1
+                        self.logger.info(
+                            f"Skipped similar image: {submission.url} "
+                            f"(similar to {result.similar_to}, "
+                            f"difference: {result.hash_difference})"
+                        )
                         
             # Save new posts
             if new_posts:
@@ -248,6 +266,7 @@ class RedditImageScraper:
         print(f"  - Duplicates: {self.stats.skipped_stats['duplicate']}")
         print(f"  - Excluded domains: {self.stats.skipped_stats['excluded_domain']}")
         print(f"  - Deleted: {self.stats.skipped_stats['deleted']}")
+        print(f"  - Similar images: {self.stats.skipped_stats['similar']}")
         print(f"Errors encountered: {self.stats.errors}")
         print("="*50)
 
