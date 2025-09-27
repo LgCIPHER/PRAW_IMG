@@ -12,6 +12,8 @@ import requests.adapters
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tqdm import tqdm
+from dataclasses import dataclass, field
+from typing import List, Dict, Set, Optional
 
 """Start Global variables"""
 dir_path = os.path.dirname(os.path.realpath(__file__))  # Path of this file
@@ -472,8 +474,30 @@ def Reddit_API():
         print(f"✓ Summary saved to: {summary_filename}")
     print(f"{'='*50}")
 
+@dataclass
+class CleanupStats:
+    """Statistics for cleanup operation"""
+    total_subreddits: int = 0
+    total_posts_checked: int = 0
+    total_removed: int = 0
+    total_errors: int = 0
+    subreddits_with_errors: Set[str] = field(default_factory=set)
+    def print_summary(self):
+        """Print formatted summary of cleanup operation"""
+        print("\n" + "="*50)
+        print("Cleanup Summary:")
+        print(f"Subreddits Processed: {self.total_subreddits}")
+        print(f"Total Posts Checked: {self.total_posts_checked}")
+        print(f"Posts Removed: {self.total_removed}")
+        print(f"Errors Encountered: {self.total_errors}")
+        if self.subreddits_with_errors:
+            print("\nSubreddits with errors:")
+            for sub in sorted(self.subreddits_with_errors):
+                print(f"  - r/{sub}")
+        print("="*50)
+
 def scan_csv():
-    """Scan and clean existing CSV files - restructured"""
+    """Scan and clean existing CSV files with improved handling and reporting"""
     print("Starting CSV cleanup scan...")
     
     # Get list of subreddits to scan
@@ -482,13 +506,80 @@ def scan_csv():
         print("No subreddits found to scan")
         return
     
-    total_removed = 0
+    stats = CleanupStats()
     
-    for sub in subreddits_to_scan:
-        removed_count = scan_subreddit_csv(sub)
-        total_removed += removed_count
+    # Process subreddits with progress bar
+    for sub in tqdm(subreddits_to_scan, desc="Processing subreddits", unit="subreddit"):
+        try:
+            stats.total_subreddits += 1
+            
+            # Check if CSV exists
+            csv_path = os.path.join(dir_path, f"{sub}_img_list.csv")
+            if not os.path.exists(csv_path):
+                print(f"\nSkipping r/{sub}: No CSV file found")
+                continue
+                
+            # Process the subreddit
+            removed_count = scan_subreddit_csv(sub)
+            stats.total_removed += removed_count
+            
+            # Check for errors
+            error_log = os.path.join(dir_path, f"{sub}_errors.log")
+            if os.path.exists(error_log):
+                stats.subreddits_with_errors.add(sub)
+                with open(error_log, 'r', encoding='utf-8') as f:
+                    error_count = len(f.readlines())
+                    stats.total_errors += error_count
+            
+        except Exception as e:
+            print(f"\nError processing r/{sub}: {e}")
+            stats.subreddits_with_errors.add(sub)
+            stats.total_errors += 1
     
-    print(f"\n✓ CSV cleanup complete! Removed {total_removed} broken URLs total")
+    # Print final summary
+    stats.print_summary()
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict, Set
+import concurrent.futures
+
+@dataclass
+class ScanResult:
+    """Class to store scanning results"""
+    valid_posts: List[Dict]
+    removed_count: int
+    error_urls: List[str]
+    error_messages: List[str]
+
+def process_url_batch(urls_data: List[Dict], session=None) -> ScanResult:
+    """Process a batch of URLs and return results"""
+    valid_posts = []
+    error_urls = []
+    error_messages = []
+    removed_count = 0
+
+    if session is None:
+        session = create_session_with_retries()
+
+    for post_data in urls_data:
+        try:
+            url_str = post_data['reddit_link']
+            deleted_flag = check_deleted_img(url_str, session)
+            
+            if not deleted_flag:
+                valid_posts.append(post_data)
+            else:
+                removed_count += 1
+                error_urls.append(url_str)
+                error_messages.append("Image deleted")
+                
+        except Exception as e:
+            removed_count += 1
+            error_urls.append(url_str)
+            error_messages.append(str(e))
+
+    return ScanResult(valid_posts, removed_count, error_urls, error_messages)
 
 def scan_subreddit_csv(subreddit_name):
     """Scan and clean a single subreddit's CSV file"""
@@ -497,35 +588,65 @@ def scan_subreddit_csv(subreddit_name):
     
     print(f"\n--- Scanning {lst_img_name} ---")
     
-    # Load existing URLs
-    already_done_set = past_list(lst_img_dir)
-    if not already_done_set:
-        print(f"No URLs found in {lst_img_name}")
-        return 0
-    
-    valid_urls = []
-    removed_count = 0
-    
-    for i, url_str in enumerate(already_done_set, 1):
-        try:
-            deleted_flag = check_deleted_img(url_str)
+    # Load existing data
+    try:
+        import csv
+        posts_data = []
+        with open(lst_img_dir, mode="r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            posts_data = list(reader)
             
-            if not deleted_flag:
-                valid_urls.append(url_str)
-                print(f"ID-{i}: ✓ Keep - {url_str}")
-            else:
-                removed_count += 1
-                print(f"ID-{i}: ✗ Remove - {url_str}")
+        if not posts_data:
+            print(f"No data found in {lst_img_name}")
+            return 0
+            
+        print(f"Found {len(posts_data)} posts to verify")
+        
+        # Process in batches using multiple threads
+        BATCH_SIZE = 10
+        batches = [posts_data[i:i + BATCH_SIZE] for i in range(0, len(posts_data), BATCH_SIZE)]
+        
+        valid_posts = []
+        removed_count = 0
+        error_log = []
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(process_url_batch, batch) for batch in batches]
+            
+            # Show progress bar for batch processing
+            for future in tqdm(as_completed(futures), 
+                             total=len(batches),
+                             desc="Processing batches",
+                             unit="batch"):
+                result = future.result()
+                valid_posts.extend(result.valid_posts)
+                removed_count += result.removed_count
                 
-        except Exception as e:
-            removed_count += 1
-            print(f"ID-{i}: ✗ Error checking - {url_str}: {e}")
-    
-    # Save cleaned list
-    save_urls_to_csv(valid_urls, lst_img_dir, f"cleaned {subreddit_name} images")
-    
-    print(f"✓ {subreddit_name}: Kept {len(valid_urls)}, Removed {removed_count}")
-    return removed_count
+                # Log errors for later review
+                for url, msg in zip(result.error_urls, result.error_messages):
+                    error_log.append(f"{url}: {msg}")
+        
+        # Save cleaned data with updated IDs
+        for i, post in enumerate(valid_posts, 1):
+            post['id'] = i
+        
+        save_urls_to_csv(valid_posts, lst_img_dir, f"cleaned {subreddit_name} images")
+        
+        # Save error log if there were any errors
+        if error_log:
+            error_log_file = os.path.join(dir_path, f"{subreddit_name}_errors.log")
+            with open(error_log_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(error_log))
+        
+        print(f"✓ {subreddit_name}: Kept {len(valid_posts)}, Removed {removed_count}")
+        if error_log:
+            print(f"  Error details saved to {subreddit_name}_errors.log")
+            
+        return removed_count
+        
+    except Exception as e:
+        print(f"Error processing {lst_img_name}: {e}")
+        return 0
 
 def main():
     """Main entry point with user options"""
