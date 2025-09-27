@@ -1,6 +1,6 @@
-reddit_config.json
-.env
-.vscode
+*.json
+*.env
+*.vscode
 *.csv
 *.sql
 *.log

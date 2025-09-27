@@ -1,8 +1,8 @@
-"""Configuration management for Reddit Image Scraper"""
+"""Fixed configuration management - replace in config.py"""
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 import logging
 
@@ -12,7 +12,7 @@ class HashConfig:
     enable_hash_comparison: bool = True
     hash_file: str = "image_hashes.json"
     hash_threshold: int = 5
-    hash_type: str = "average"  # can be "average", "perceptual", "difference", or "wavelet"
+    hash_type: str = "average"
 
 @dataclass
 class ScrapingConfig:
@@ -24,7 +24,7 @@ class ScrapingConfig:
     enable_duplicate_detection: bool = True
     enable_deleted_image_check: bool = True
     batch_size: int = 10
-    min_image_size: int = 10240  # 10KB minimum size
+    min_image_size: int = 10240
     hash_config: HashConfig = field(default_factory=HashConfig)
 
 @dataclass
@@ -50,9 +50,7 @@ class ConfigManager:
     """Manages configuration loading and validation"""
     
     def __init__(self, config_path: str):
-        # Get the parent directory (PRAW_IMG folder)
         self.dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        # Ensure config_path is in parent directory if only filename is provided
         if os.path.basename(config_path) == config_path:
             self.config_path = os.path.join(self.dir_path, config_path)
         else:
@@ -76,12 +74,23 @@ class ConfigManager:
             # Load credentials
             self.reddit_credentials = config_data.get("reddit_credentials", {})
             
-            # Load other configs using dataclasses
+            # Load scraping config
             scraping_dict = config_data.get("scraping_settings", {})
+            
+            # FIXED: Handle hash_config properly
+            hash_config_dict = scraping_dict.pop("hash_config", {})
+            hash_config = HashConfig(**hash_config_dict) if hash_config_dict else HashConfig()
+            
+            # Create scraping config with hash_config
+            self.scraping_config = ScrapingConfig(
+                **scraping_dict,
+                hash_config=hash_config
+            )
+            
+            # Load other configs
             performance_dict = config_data.get("performance_settings", {})
             output_dict = config_data.get("output_settings", {})
             
-            self.scraping_config = ScrapingConfig(**scraping_dict)
             self.performance_config = PerformanceConfig(**performance_dict)
             self.output_config = OutputConfig(**output_dict)
             
@@ -99,11 +108,14 @@ class ConfigManager:
         # Get credentials interactively
         self.reddit_credentials = await self._get_credentials()
         
+        # Convert dataclasses to dict, handling nested dataclass
+        scraping_dict = asdict(self.scraping_config)
+        
         config_data = {
             "reddit_credentials": self.reddit_credentials,
-            "scraping_settings": self.scraping_config.__dict__,
-            "performance_settings": self.performance_config.__dict__,
-            "output_settings": self.output_config.__dict__
+            "scraping_settings": scraping_dict,
+            "performance_settings": asdict(self.performance_config),
+            "output_settings": asdict(self.output_config)
         }
         
         with open(self.config_path, 'w') as config_file:
@@ -164,15 +176,12 @@ class ConfigManager:
         # Validate credential format
         format_errors = []
         
-        # Client ID should be ~22 characters
         if len(self.reddit_credentials["client_id"]) < 20:
             format_errors.append("Client ID seems too short (should be ~22 characters)")
             
-        # Client Secret should be ~30 characters
         if len(self.reddit_credentials["client_secret"]) < 25:
             format_errors.append("Client Secret seems too short (should be ~30 characters)")
             
-        # User Agent should contain version number
         if not any(char.isdigit() for char in self.reddit_credentials["user_agent"]):
             format_errors.append("User Agent should include a version number (e.g., 'MyBot/1.0')")
             
