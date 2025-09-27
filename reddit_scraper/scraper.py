@@ -12,6 +12,9 @@ from .auth import CredentialTester
 from .config import ConfigManager
 from .data_manager import DataManager, RedditPost
 from .image_processor import ImageProcessor, ImageValidationResult
+from .session_manager import SessionManager
+from .retry_handler import with_retry
+from .progress_manager import ProgressManager, ResumableOperation
 
 @dataclass
 class ScrapingStats:
@@ -36,6 +39,8 @@ class RedditImageScraper:
         self.dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         self.config_manager = ConfigManager(config_path)
         self.data_manager = DataManager()
+        self.session_manager = SessionManager()
+        self.progress_manager = ProgressManager()
         self.image_processor = None
         self.reddit = None
         self.logger = logging.getLogger(__name__)
@@ -109,6 +114,7 @@ class RedditImageScraper:
             self.logger.error(f"Initialization failed: {e}")
             return False
 
+    @with_retry(max_attempts=3, base_delay=1.0)
     async def process_subreddit(self, subreddit_name: str) -> Tuple[List[RedditPost], Set[str]]:
         """Process a single subreddit"""
         self.logger.info(f"Starting processing of r/{subreddit_name}")

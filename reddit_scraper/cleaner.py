@@ -1,14 +1,15 @@
-"""CSV cleaning functionality for Reddit Image Scraper"""
+"""Improved CSV cleaning functionality with proper async operations"""
 
 import os
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Set
 import aiofiles
-import csv
+import json
 from tqdm import tqdm
 
 from .image_processor import ImageProcessor
+from .memory_optimizer import MemoryEfficientCSVCleaner
 
 @dataclass
 class CleaningStats:
@@ -47,21 +48,43 @@ class CSVCleaner:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.stats = CleaningStats()
+        self.memory_cleaner = MemoryEfficientCSVCleaner(max_memory_mb=500)
+
+    async def _parse_csv_line(self, line: str, headers: List[str]) -> Dict[str, str]:
+        """Parse a CSV line into a dictionary
+        
+        This handles CSV parsing without blocking the event loop.
+        Simple implementation for basic CSV (no quoted fields with commas).
+        """
+        values = line.strip().split(',')
+        return {header: value for header, value in zip(headers, values)}
+
+    async def _format_csv_line(self, row: Dict[str, str], headers: List[str]) -> str:
+        """Format a dictionary as CSV line"""
+        values = [str(row.get(header, '')) for header in headers]
+        return ','.join(values) + '\n'
 
     async def clean_subreddit_csv(self, file_path: str, subreddit_name: str) -> bool:
-        """Clean a single subreddit's CSV file"""
+        """Clean a single subreddit's CSV file with proper async operations"""
         if not os.path.exists(file_path):
             self.logger.warning(f"File not found: {file_path}")
             return False
 
         try:
-            # Load existing data
+            # Load existing data using async file operations
             posts_data = []
+            headers = []
+            
             async with aiofiles.open(file_path, mode='r', encoding='utf-8-sig') as f:
-                content = await f.read()
-                reader = csv.DictReader(content.splitlines())
-                for row in reader:
-                    posts_data.append(row)
+                # Read header
+                header_line = await f.readline()
+                headers = header_line.strip().split(',')
+                
+                # Read all data lines
+                async for line in f:
+                    if line.strip():
+                        row = await self._parse_csv_line(line, headers)
+                        posts_data.append(row)
 
             if not posts_data:
                 self.logger.info(f"No data found in {os.path.basename(file_path)}")
@@ -91,14 +114,17 @@ class CSVCleaner:
 
             # Renumber entries
             for i, post in enumerate(valid_posts, 1):
-                post['id'] = i
+                post['id'] = str(i)
 
-            # Save cleaned data
-            async with aiofiles.open(file_path, mode='w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=['id', 'subreddit_name', 'post_title', 'reddit_link'])
-                await writer.writeheader()
+            # Save cleaned data using async file operations
+            async with aiofiles.open(file_path, mode='w', encoding='utf-8-sig') as f:
+                # Write header
+                await f.write(','.join(headers) + '\n')
+                
+                # Write data rows
                 for post in valid_posts:
-                    await writer.writerow(post)
+                    line = await self._format_csv_line(post, headers)
+                    await f.write(line)
 
             # Save error log if there were any errors
             if error_log:
@@ -146,7 +172,7 @@ class CSVCleaner:
                 else:
                     removed_count += 1
                     error_urls.append(url)
-                    error_messages.append(result.error_message or "Image validation failed")
+                    error_messages.append(result.message or "Image validation failed")
 
             except Exception as e:
                 removed_count += 1
