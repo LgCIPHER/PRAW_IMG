@@ -52,7 +52,7 @@ Enter choice [1-4]: 1
 ### Workflow Diagram
 
 ```mermaid
-flowchart TD;
+graph TD;
     A[Start] --> B[Read sub_list.csv];
     B --> C[Authenticate with Reddit API];
     C --> D[Fetch subreddit posts];
