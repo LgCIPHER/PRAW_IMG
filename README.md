@@ -52,17 +52,17 @@ Enter choice [1-4]: 1
 ### Workflow Diagram
 
 ```mermaid
-flowchart TD
-    A[Start] --> B[Read sub_list.csv]
-    B --> C[Authenticate with Reddit API]
-    C --> D[Fetch subreddit posts]
-    D --> E[Validate images]
-    E --> F[Filter formats & domains]
-    F --> G[Detect duplicates & deleted]
-    G --> H[Save results to CSV]
-    H --> I[Generate logs]
-    I --> J[Cleanup operation (optional)]
-    J --> K[End]
+flowchart TD;
+    A[Start] --> B[Read sub_list.csv];
+    B --> C[Authenticate with Reddit API];
+    C --> D[Fetch subreddit posts];
+    D --> E[Validate images];
+    E --> F[Filter formats & domains];
+    F --> G[Detect duplicates & deleted];
+    G --> H[Save results to CSV];
+    H --> I[Generate logs];
+    I --> J[Cleanup operation (optional)];
+    J --> K[End];
 ```
 
 ---
