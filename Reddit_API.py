@@ -1,19 +1,20 @@
-from praw import Reddit
-import os.path
-from pathlib import Path
-import json
-import requests
-import cv2 as cv
-import numpy as np
-import time
-from functools import wraps
-import logging
-import requests.adapters
-from requests.adapters import HTTPAdapter
+from praw import Reddit # PRAW is the Python Reddit API Wrapper
+import os.path      
+from pathlib import Path    
+import json     
+import requests 
+import cv2 as cv    
+import numpy as np  
+import time             
+from functools import wraps         
+import logging          
+import requests.adapters            
+from requests.adapters import HTTPAdapter   
 from urllib3.util.retry import Retry
 from tqdm import tqdm
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 """Start Global variables"""
 dir_path = os.path.dirname(os.path.realpath(__file__))  # Path of this file
@@ -253,13 +254,10 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
     # Create session with retry logic
     session = create_session_with_retries()
     
-    # Initialize lists
-    new_images = []
+    # Initialize tracking variables
     count = 0
-    
-    # Set up file paths
-    lst_img_name = f"{subreddit_name}_img_list.csv"
-    lst_img_dir = os.path.join(dir_path, lst_img_name)
+    new_posts_data = []
+    new_images = []
     
     # Load existing URLs
     past_result = past_list(lst_img_dir)
@@ -270,77 +268,82 @@ def process_subreddit(reddit, subreddit_name, config, dir_path):
         subreddit = reddit.subreddit(subreddit_name)
         submissions = list(subreddit.top(limit=post_limit))
         
-        # Initialize tracking variables
-        new_posts_data = []
-        new_images = []
-        processed_count = 0
-        batch = []
-        
-        # Process submissions in batches
-        for submission in tqdm(submissions, 
-                      desc=f"Processing r/{subreddit_name}",
-                      total=len(submissions),
-                      unit="post",
-                      colour="green",
-                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} posts [{elapsed}<{remaining}]\n"):
+        print(f"Pre-filtering {len(submissions)} submissions...")
+
+        candidate_submissions = []
+        skipped_stats = {
+            'wrong_format': 0,
+            'duplicate': 0,
+            'excluded_domain': 0
+        }        
+
+        # First pass: Quick filters (no network calls)
+        for submission in submissions:
             url_str = str(submission.url.lower())
             
-            # Check if it's an image with supported format
-            if any(f".{fmt}" in url_str for fmt in supported_formats):
+            # Check 1: Is it an image with supported format?
+            if not any(f".{fmt}" in url_str for fmt in supported_formats):
+                skipped_stats['wrong_format'] += 1
+                continue
+            
+            # Check 2: Do we already have this URL?
+            if url_str in already_done_set:
+                skipped_stats['duplicate'] += 1
+                continue
+            
+            # Check 3: Is the domain excluded?
+            if submission.domain in excluded_domains:
+                skipped_stats['excluded_domain'] += 1
+                continue
+            
+            # Passed all filters - add to candidates
+            candidate_submissions.append(submission)
+
+        # Print filtering statistics
+        print(f"Pre-filtering complete:")
+        print(f"  ✓ Candidates to check: {len(candidate_submissions)}")
+        print(f"  ✗ Wrong format: {skipped_stats['wrong_format']}")
+        print(f"  ✗ Duplicates: {skipped_stats['duplicate']}")
+        print(f"  ✗ Excluded domains: {skipped_stats['excluded_domain']}")
+
+        # ============ Second pass: Check candidate images (network calls) ============
+        if not candidate_submissions:
+            print(f"No new images to check in r/{subreddit_name}")
+        else:
+            for submission in tqdm(candidate_submissions, 
+                                desc=f"Checking images from r/{subreddit_name}",
+                                total=len(candidate_submissions),
+                                unit="image",
+                                colour="green"):
+                url_str = str(submission.url.lower())
                 
-                # Check if we already have this URL
-                if url_str not in already_done_set:
-                    domain_name = submission.domain
+                try:
+                    # Check if image is deleted (THIS is the slow network call)
+                    deleted_flag = check_deleted_img(url_str, session)
                     
-                    # Skip excluded domains
-                    if domain_name not in excluded_domains:
-                        try:
-                            # Validate image
-                            img = html_to_img(url_str, session)
-                            
-                            # Check image validity
-                            if not ImageValidator.check_image_size(img, min_image_size):
-                                logger.warning(f"Image too small: {url_str}")
-                                continue
-                                
-                            deleted_flag = check_deleted_img(url_str, session)
-                            
-                            if not deleted_flag:
-                                # Create post data dictionary
-                                post_data = {
-                                    'id': count + 1,
-                                    'subreddit_name': subreddit_name,
-                                    'post_title': submission.title,
-                                    'reddit_link': url_str
-                                }
-                                
-                                # Add to batch
-                                batch.append(post_data)
-                                new_images.append(url_str)
-                                already_done_set.add(url_str)
-                                count += 1
-                                logger.info(f"Added: {url_str}")
-                                
-                                # Process batch if full
-                                if len(batch) >= batch_size:
-                                    new_posts_data.extend(batch)
-                                    if new_posts_data:
-                                        save_urls_to_csv(batch, lst_img_dir, f"batch {subreddit_name}", append=True)
-                                    batch = []
-                            else:
-                                logger.info(f"Skipped deleted image: {url_str}")
-                                
-                        except Exception as e:
-                            logger.error(f"Error processing {url_str}: {e}")
+                    if not deleted_flag:
+                        # Create post data dictionary
+                        post_data = {
+                            'id': count + 1,
+                            'subreddit_name': subreddit_name,
+                            'post_title': submission.title,
+                            'reddit_link': url_str
+                        }
+                        
+                        # Add to our lists
+                        new_posts_data.append(post_data)
+                        new_images.append(url_str)
+                        already_done_set.add(url_str)
+                        count += 1
+                        print(f"ID-{count}-Added: {url_str}")
                     else:
-                        logger.info(f"Skipped excluded domain: {domain_name}")
-                else:
-                    logger.debug(f"Already exists: {url_str}")
-        
-        # Process remaining batch
-        if batch:
-            new_posts_data.extend(batch)
-            save_urls_to_csv(batch, lst_img_dir, f"final batch {subreddit_name}", append=True)
+                        print(f"Skipped deleted image: {url_str}")
+                        
+                except Exception as e:
+                    print(f"Error processing {url_str}: {e}")
+        # Save all new posts to CSV
+        if new_posts_data:
+            save_urls_to_csv(new_posts_data, lst_img_dir, f"new r/{subreddit_name} images", append=True)
         
         logger.info(f"Found {count} new images in r/{subreddit_name}")
         return new_posts_data, new_images, already_done_set
@@ -462,7 +465,6 @@ def save_urls_to_csv(data, file_path, description="URLs", append=False):
 
 def past_list(lst_img_dir):
     """Read URLs from existing CSV file with error handling"""
-    past_data = []
     past_urls = set()  # Use set for faster lookup
     
     # Check if file exists first
@@ -476,8 +478,7 @@ def past_list(lst_img_dir):
             reader = csv.DictReader(f_past_result)
             for row in reader:
                 if row.get('reddit_link'):  # Get URL from the reddit_link column
-                    past_data.append(row)
-                    past_urls.add(row['reddit_link'])
+                    past_urls.add(row['reddit_link'].lower())
                     
         print(f"✓ Loaded {len(past_urls)} existing URLs from {os.path.basename(lst_img_dir)}")
     except FileNotFoundError:
@@ -608,11 +609,6 @@ def scan_csv():
     
     # Print final summary
     stats.print_summary()
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import List, Dict, Set
-import concurrent.futures
 
 @dataclass
 class ScanResult:
