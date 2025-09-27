@@ -101,7 +101,8 @@ class DataManager:
                     await writer.writeheader()
                     
                 for post in posts:
-                    await writer.writerow(post.__dict__)
+                    row = {h: getattr(post, h) for h in headers}
+                    await writer.writerow(row)
                     
             self.logger.info(f"✓ Saved {len(posts)} {description.lower()} to {os.path.basename(file_path)}")
             return True
