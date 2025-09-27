@@ -67,6 +67,10 @@ flowchart TD
 
 ---
 
+## Project Background
+
+This project started as a small experiment to explore the Reddit API and practice working with CSV data. The initial version was a simple script for fetching and saving image links. Over time, with the help from vibe coding, I restructured it into a more organized, object-oriented application. As someone without a formal computer science background, this project provided hands-on experience in asynchronous programming, API integration, and structuring Python code for scalability and maintainability.
+
 ## Features
 
 - Asynchronous for performance
