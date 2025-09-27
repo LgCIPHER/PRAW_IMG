@@ -1,18 +1,19 @@
 # Reddit Image Scraper
 
-A Python script that efficiently scrapes image URLs from specified Reddit subreddits, with progress tracking and comprehensive validation, saving them to CSV files for further analysis or processing.
+An asynchronous Python application that efficiently scrapes image URLs from Reddit subreddits, with comprehensive validation, progress tracking, and CSV file management.
 
 ## Features
 
-- Scrapes image URLs from multiple subreddits with progress visualization
+- Asynchronous processing for improved performance
+- Object-oriented design with clear separation of concerns
+- Progress visualization for all operations
 - Filters for specific image formats (JPG, PNG, JPEG)
 - Advanced duplicate detection and removal
 - Automatic deleted image detection and filtering
 - Domain-based filtering (configurable excluded domains)
-- Progress bars for real-time scraping status
 - Excel-compatible CSV output with proper encoding
-- Secure credential and configuration management via JSON
-- Bulk CSV cleanup and maintenance tools
+- Comprehensive CSV maintenance tools
+- Secure credential and configuration management
 
 ## Requirements
 
@@ -21,11 +22,15 @@ A Python script that efficiently scrapes image URLs from specified Reddit subred
 Install the required libraries using pip:
 
 ```bash
-pip install praw requests opencv-python numpy
+pip install asyncpraw aiohttp opencv-python numpy tqdm aiofiles
 ```
 
-- **PRAW** (Python Reddit API Wrapper) - Reddit API access
-- **requests** - HTTP requests for image validation
+- **asyncpraw** - Asynchronous Reddit API Wrapper
+- **aiohttp** - Asynchronous HTTP requests
+- **opencv-python** - Image processing and comparison
+- **numpy** - Array operations for image data
+- **tqdm** - Progress bar visualization
+- **aiofiles** - Asynchronous file operations
 - **opencv-python** - Image processing and comparison
 - **numpy** - Array operations for image data
 
@@ -72,36 +77,44 @@ The script creates a `reddit_config.json` file with comprehensive settings:
     "password": "your_password"
   },
   "scraping_settings": {
-    "post_limit": 20,
+    "post_limit": 100,
     "search_type": "top",
     "supported_formats": ["jpg", "png", "jpeg"],
-    "excluded_domains": ["i.imgur.com"],
+    "excluded_domains": ["i.imgur.com", "v.redd.it"],
     "enable_duplicate_detection": true,
-    "enable_deleted_image_check": true
+    "enable_deleted_image_check": true,
+    "batch_size": 10,
+    "min_image_size": 10240
   },
   "performance_settings": {
     "request_timeout_seconds": 30,
-    "retry_attempts": 5,
-    "rate_limit_delay": 1.0
+    "retry_attempts": 3,
+    "rate_limit_delay": 1.0,
+    "max_workers": 4,
+    "max_memory_mb": 500,
+    "reddit_api_retries": 3,
+    "reddit_api_retry_delay": 5
   },
   "output_settings": {
     "csv_encoding": "utf-8-sig",
-    "summary_filename": "new_img.csv"
+    "summary_filename": "new_img.csv",
+    "log_level": "INFO",
+    "save_error_logs": true
   }
 }
 ```
 
 ## Usage
 
-### Basic Usage
+### Running the Script
 
 ```bash
-python Reddit_API.py
+python main.py
 ```
 
-### What the Script Does
+### Available Operations
 
-The script offers three main operation modes:
+The script provides four operation modes:
 
 1. **Scrape New Images**
 
@@ -118,77 +131,102 @@ The script offers three main operation modes:
 2. **Clean Existing CSVs**
 
    - Scans all existing subreddit CSV files
-   - Checks each URL for validity and accessibility
-   - Removes broken or deleted image links
+   - Validates each image URL:
+     - Checks format validity
+     - Verifies image accessibility
+     - Ensures minimum size requirements
+   - Removes dead or invalid links
    - Updates CSV files with clean data
+   - Generates error logs for failed validations
 
 3. **Combined Operation**
+
    - Performs both scraping and cleaning in sequence
    - Ensures completely clean and up-to-date results
+
+4. **Clean Specific Subreddit**
+   - Cleans a single subreddit's CSV file
+   - Provides detailed progress and results
+   - Creates subreddit-specific error log
 
 ### Output Files
 
 - `{subreddit}_img_list.csv` - Complete list of image URLs for each subreddit
 - `new_img.csv` - URLs of images found in the current run
-- `reddit_config.json` - Secure credential storage (auto-generated)
+- `reddit_config.json` - Configuration and credentials
+- `{subreddit}_errors.log` - Error details for failed validations
+- `reddit_scraper.log` - General operation logs
 
-## Functions
+## Project Structure
 
-### Key Functions
+```
+project/
+├── main.py                 # Main entry point
+├── sub_list.csv           # List of subreddits to scrape
+├── reddit_config.json     # Configuration file
+├── reddit_scraper/        # Package directory
+│   ├── __init__.py       # Package initialization
+│   ├── auth.py           # Authentication handling
+│   ├── config.py         # Configuration management
+│   ├── data_manager.py   # Data persistence operations
+│   ├── image_processor.py # Image validation and processing
+│   ├── cleaner.py        # CSV cleaning functionality
+│   └── scraper.py        # Main scraping implementation
+├── {subreddit}_img_list.csv  # Results for each subreddit
+├── new_img.csv            # Latest scraping results
+└── .gitignore            # Git ignore configuration
 
-#### Core Functions
+## Security Notes
 
-- `main()` - Entry point with interactive mode selection
-- `Reddit_API()` - Main scraping function with progress tracking
-- `scan_csv()` - CSV file maintenance and cleanup
+- Credentials are stored locally in `reddit_config.json`
+- The script creates a `.gitignore` file to prevent credential exposure
+- Never share your `reddit_config.json` file
 
-#### Configuration Management
+## Excel Integration
 
-- `create_token()` - Interactive credential setup
-- `load_config()` - Loads or creates configuration
-- `create_default_config()` - Generates default configuration
+The CSV files are formatted for easy Excel integration:
 
-#### Subreddit Processing
+- UTF-8-sig encoding for proper character display
+- Consistent column structure
+- Compatible with Excel's Data → From Text/CSV import feature
 
-- `process_subreddit()` - Handles individual subreddit scraping
-- `read_subreddit_list()` - Loads and validates subreddit names
-- `scan_subreddit_csv()` - Cleans individual subreddit files
+## Contributing
 
-#### Image Processing
+Feel free to submit issues, fork the repository, and create pull requests for any improvements.
 
-- `check_deleted_img()` - Validates image accessibility
-- `safe_check_deleted_img()` - Robust image checking with retries
-- `compare_img()` - OpenCV-based image comparison
-- `html_to_img()` - Converts URL to image array
+## License
 
-#### File Operations
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-- `save_urls_to_csv()` - Writes URLs with error handling
-- `past_list()` - Loads existing URLs with validation
-
-## Configuration Options
-
-All settings are managed through `reddit_config.json`:
+## Configuration Details
 
 ### Scraping Settings
 
-- `post_limit` - Number of posts to check per subreddit (default: 20)
-- `search_type` - Post sorting method (default: "top")
-- `supported_formats` - Image formats to collect (jpg, png, jpeg)
-- `excluded_domains` - Domains to skip (e.g., ["i.imgur.com"])
-- `enable_duplicate_detection` - Compare images for duplicates
-- `enable_deleted_image_check` - Verify image accessibility
+- `post_limit` (int) - Number of posts to check per subreddit (default: 100)
+- `search_type` (str) - Post sorting method (default: "top")
+- `supported_formats` (list) - Image formats to collect (jpg, png, jpeg)
+- `excluded_domains` (list) - Domains to skip (e.g., ["i.imgur.com", "v.redd.it"])
+- `enable_duplicate_detection` (bool) - Compare images for duplicates
+- `enable_deleted_image_check` (bool) - Verify image accessibility
+- `batch_size` (int) - Number of images to process in parallel (default: 10)
+- `min_image_size` (int) - Minimum image size in bytes (default: 10KB)
 
 ### Performance Settings
 
-- `request_timeout_seconds` - HTTP request timeout
-- `retry_attempts` - Number of retries for failed requests
-- `rate_limit_delay` - Delay between requests to avoid rate limiting
+- `request_timeout_seconds` (int) - HTTP request timeout (default: 30)
+- `retry_attempts` (int) - Number of retries for failed requests (default: 3)
+- `rate_limit_delay` (float) - Delay between requests (default: 1.0)
+- `max_workers` (int) - Maximum concurrent workers (default: 4)
+- `max_memory_mb` (int) - Maximum memory usage in MB (default: 500)
+- `reddit_api_retries` (int) - Reddit API retry attempts (default: 3)
+- `reddit_api_retry_delay` (int) - Delay between API retries (default: 5)
 
 ### Output Settings
 
-- `csv_encoding` - File encoding for CSV files
-- `summary_filename` - Name of the combined results file
+- `csv_encoding` (str) - File encoding for CSV files (default: "utf-8-sig")
+- `summary_filename` (str) - Name of the combined results file
+- `log_level` (str) - Logging level (default: "INFO")
+- `save_error_logs` (bool) - Save detailed error logs (default: true)
 
 ## Security Notes
 
@@ -199,13 +237,15 @@ All settings are managed through `reddit_config.json`:
 ## File Structure
 
 ```
+
 project/
-├── Reddit_API.py          # Main script
-├── sub_list.csv           # List of subreddits to scrape
-├── reddit_config.json     # Credentials (auto-generated)
-├── {subreddit}_img_list.csv  # Results for each subreddit
-├── new_img.csv            # Latest scraping results
-└── .gitignore             # Prevents committing sensitive files
+├── Reddit_API.py # Main script
+├── sub_list.csv # List of subreddits to scrape
+├── reddit_config.json # Credentials (auto-generated)
+├── {subreddit}\_img_list.csv # Results for each subreddit
+├── new_img.csv # Latest scraping results
+└── .gitignore # Prevents committing sensitive files
+
 ```
 
 ## Excel Integration
@@ -249,3 +289,4 @@ The CSV files are formatted for easy import into Excel:
 ## Contributing
 
 Feel free to submit issues or pull requests to improve the functionality.
+```

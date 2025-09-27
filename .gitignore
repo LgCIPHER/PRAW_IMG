@@ -4,3 +4,6 @@ reddit_config.json
 *.csv
 *.sql
 *.log
+*.bak
+__pycache__
+*.pyc
