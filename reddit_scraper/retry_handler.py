@@ -1,4 +1,4 @@
-"""Retry mechanism with exponential backoff and jitter"""
+"""Retry handler with exponential backoff for network operations"""
 
 import asyncio
 import logging

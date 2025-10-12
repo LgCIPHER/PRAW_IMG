@@ -1,4 +1,4 @@
-"""Fixed configuration management - replace in config.py"""
+"""Configuration management for Reddit Image Scraper"""
 
 import json
 import os

@@ -1,7 +1,7 @@
 """Data management for Reddit Image Scraper"""
 
 import os
-import csv
+import aiocsv
 from dataclasses import dataclass
 from typing import List, Dict, Set, Optional
 import logging
@@ -70,9 +70,8 @@ class DataManager:
             
         try:
             async with aiofiles.open(file_path, mode='r', encoding='utf-8-sig') as f:
-                content = await f.read()
-                reader = csv.DictReader(content.splitlines())
-                for row in reader:
+                reader = aiocsv.AsyncDictReader(f)
+                async for row in reader:
                     if row.get('reddit_link'):
                         urls.add(row['reddit_link'].lower())
                         
@@ -96,7 +95,8 @@ class DataManager:
             
             async with aiofiles.open(file_path, mode=mode, encoding='utf-8-sig', 
                                    newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=headers)
+                writer = aiocsv.AsyncDictWriter(f, fieldnames=headers)
+                
                 if mode == "w":
                     await writer.writeheader()
                     

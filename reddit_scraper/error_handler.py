@@ -1,4 +1,4 @@
-"""Enhanced error handling and logging system"""
+"""Enhanced error handling and logging for Reddit Image Scraper"""
 
 import logging
 import sys

@@ -1,10 +1,11 @@
-"""Improved CSV cleaning functionality with proper async operations"""
+"""Cleans CSV files by removing dead or invalid image URLs"""
 
 import os
 import logging
 from dataclasses import dataclass, field
 from typing import List, Dict, Set
 import aiofiles
+import aiocsv
 import json
 from tqdm import tqdm
 
@@ -50,20 +51,6 @@ class CSVCleaner:
         self.stats = CleaningStats()
         self.memory_cleaner = MemoryEfficientCSVCleaner(max_memory_mb=500)
 
-    async def _parse_csv_line(self, line: str, headers: List[str]) -> Dict[str, str]:
-        """Parse a CSV line into a dictionary
-        
-        This handles CSV parsing without blocking the event loop.
-        Simple implementation for basic CSV (no quoted fields with commas).
-        """
-        values = line.strip().split(',')
-        return {header: value for header, value in zip(headers, values)}
-
-    async def _format_csv_line(self, row: Dict[str, str], headers: List[str]) -> str:
-        """Format a dictionary as CSV line"""
-        values = [str(row.get(header, '')) for header in headers]
-        return ','.join(values) + '\n'
-
     async def clean_subreddit_csv(self, file_path: str, subreddit_name: str) -> bool:
         """Clean a single subreddit's CSV file with proper async operations"""
         if not os.path.exists(file_path):
@@ -71,20 +58,13 @@ class CSVCleaner:
             return False
 
         try:
-            # Load existing data using async file operations
+            # Load existing data using aiocsv
             posts_data = []
-            headers = []
             
             async with aiofiles.open(file_path, mode='r', encoding='utf-8-sig') as f:
-                # Read header
-                header_line = await f.readline()
-                headers = header_line.strip().split(',')
-                
-                # Read all data lines
-                async for line in f:
-                    if line.strip():
-                        row = await self._parse_csv_line(line, headers)
-                        posts_data.append(row)
+                reader = aiocsv.AsyncDictReader(f)
+                async for row in reader:
+                    posts_data.append(row)
 
             if not posts_data:
                 self.logger.info(f"No data found in {os.path.basename(file_path)}")
@@ -116,15 +96,14 @@ class CSVCleaner:
             for i, post in enumerate(valid_posts, 1):
                 post['id'] = str(i)
 
-            # Save cleaned data using async file operations
-            async with aiofiles.open(file_path, mode='w', encoding='utf-8-sig') as f:
-                # Write header
-                await f.write(','.join(headers) + '\n')
+            # Save cleaned data using aiocsv
+            headers = ['id', 'subreddit_name', 'post_title', 'reddit_link']
+            async with aiofiles.open(file_path, mode='w', encoding='utf-8-sig', newline='') as f:
+                writer = aiocsv.AsyncDictWriter(f, fieldnames=headers)
+                await writer.writeheader()
                 
-                # Write data rows
                 for post in valid_posts:
-                    line = await self._format_csv_line(post, headers)
-                    await f.write(line)
+                    await writer.writerow(post)
 
             # Save error log if there were any errors
             if error_log:
