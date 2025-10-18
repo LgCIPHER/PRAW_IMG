@@ -1,12 +1,12 @@
 # Reddit Image Scraper
 
-An asynchronous Python tool for scraping image URLs from Reddit subreddits with validation, duplicate removal, and CSV management.
+A robust, asynchronous Python tool for scraping and validating image URLs from Reddit subreddits, featuring comprehensive error handling, resource monitoring, and efficient batch processing.
 
 ## Quick Start
 
 ```bash
 # 1. Install dependencies
-pip install asyncpraw aiohttp opencv-python numpy tqdm aiofiles
+pip install -r requirements.txt
 
 # 2. Create sub_list.csv with subreddit names
 Pixiv
@@ -73,16 +73,39 @@ This project started as a small experiment to explore the Reddit API and practic
 
 ## Features
 
-- Asynchronous for performance
-- Object-oriented structure
-- Progress visualization
-- Image format filters (JPG, PNG, JPEG)
-- Duplicate and deleted image detection
+Core Features:
+
+- Asynchronous processing for optimal performance
+- Robust error handling with custom exception hierarchy
+- Resource monitoring and adaptive batch processing
+- Comprehensive configuration validation
+- Progress visualization with detailed statistics
+
+Image Processing:
+
+- Advanced duplicate detection using perceptual hashing
+- Format validation (JPG, PNG, JPEG)
+- Size and dimension checks
 - Domain-based filtering
+- Deleted image detection
+
+Data Management:
+
 - Excel-compatible CSV output (UTF-8-sig)
-- Secure credential storage
+- Efficient batch processing with configurable sizes
+- Automatic retry mechanisms for failed requests
+- Detailed logging with error categorization
+
+Security:
+
+- Secure credential storage with encryption
+- Configuration validation using JSONSchema
+- Rate limiting and request throttling
+- Resource usage monitoring and optimization
 
 ## Requirements
+
+Core Dependencies:
 
 - **asyncpraw** – Reddit API wrapper
 - **aiohttp** – Async HTTP requests
@@ -90,6 +113,14 @@ This project started as a small experiment to explore the Reddit API and practic
 - **numpy** – Image data arrays
 - **tqdm** – Progress bars
 - **aiofiles** – Async file operations
+
+Additional Dependencies:
+
+- **jsonschema** – Configuration validation
+- **psutil** – System resource monitoring
+- **imagehash** – Image comparison and duplicate detection
+- **pytest** – Testing framework (development only)
+- **pytest-asyncio** – Async test support (development only)
 
 ## Usage
 
@@ -113,25 +144,48 @@ project/
 ├── main.py                  # Main script
 ├── sub_list.csv             # Subreddits list
 ├── reddit_config.json       # Config file
+├── requirements.txt         # Project dependencies
+├── tests/                   # Test suite
+│   ├── conftest.py         # Test configuration
+│   ├── test_scraper.py     # Core functionality tests
+│   └── test_data/          # Test fixtures
 ├── reddit_scraper/          # Core package
-│   ├── auth.py              # Authentication
-│   ├── config.py            # Config management
-│   ├── data_manager.py      # Data operations
-│   ├── image_processor.py   # Image validation
-│   ├── cleaner.py           # CSV cleaning
-│   └── scraper.py           # Scraping logic
-└── .gitignore               # Prevents exposing credentials
+│   ├── base.py             # Base classes and utilities
+│   ├── auth.py             # Authentication
+│   ├── config.py           # Config management
+│   ├── data_manager.py     # Data operations
+│   ├── image_processor.py  # Image validation
+│   ├── cleaner.py         # CSV cleaning
+│   ├── exceptions.py      # Custom exceptions
+│   └── scraper.py        # Scraping logic
+└── .gitignore             # Prevents exposing credentials
 ```
 
-## Key Settings
+## Configuration
 
-- `post_limit`: posts per subreddit (default 100)
-- `supported_formats`: [jpg, png, jpeg]
-- `excluded_domains`: e.g., ["i.imgur.com"]
-- `batch_size`: parallel image checks (default 10)
-- `min_image_size`: minimum image size (10KB)
-- `retry_attempts`: failed request retries (default 3)
-- `rate_limit_delay`: delay between requests (default 1s)
+All settings are validated using JSONSchema:
+
+Performance Settings:
+
+- `batch_size`: Parallel image checks (default 10, auto-adjusted based on system resources)
+- `rate_limit_delay`: Delay between requests (default 1s, adaptive based on Reddit's response)
+- `max_memory_percent`: Maximum memory usage before batch size adjustment (default 75%)
+- `max_cpu_percent`: Maximum CPU usage threshold (default 80%)
+
+Reddit Settings:
+
+- `post_limit`: Posts per subreddit (default 100)
+- `retry_attempts`: Failed request retries (default 3)
+- `request_timeout`: Timeout for requests (default 30s)
+
+Image Processing:
+
+- `supported_formats`: Allowed formats [jpg, png, jpeg]
+- `excluded_domains`: Blocked domains (e.g., ["i.imgur.com"])
+- `min_image_size`: Minimum file size (10KB)
+- `min_dimensions`: Minimum width/height (100x100)
+- `hash_size`: Perceptual hash size for duplicate detection (default 8)
+- `hash_threshold`: Similarity threshold for duplicates (default 0.9)
 
 ## Security
 
@@ -146,13 +200,67 @@ project/
 
 ## Troubleshooting
 
-- **API errors**: Check credentials
-- **Rate limits**: Increase `rate_limit_delay`
-- **Image errors**: Deleted or inaccessible (auto-retried)
+Common Issues:
+
+- **API Errors**:
+  - Check credentials in `reddit_config.json`
+  - Verify internet connection
+  - Check Reddit API status
+- **Rate Limits**:
+  - System automatically adjusts `rate_limit_delay`
+  - Monitor `reddit_scraper.log` for rate limit warnings
+  - Consider reducing `batch_size` if persistent
+- **Performance Issues**:
+  - System automatically adjusts batch size based on resources
+  - Check `max_memory_percent` and `max_cpu_percent` settings
+  - Monitor resource usage in logs
+- **Image Errors**:
+  - Deleted or inaccessible images are auto-retried
+  - Check error logs for specific failure reasons
+  - Verify image domain is not blocked
+
+For detailed error information, check:
+
+- `reddit_scraper.log`: General operation logs
+- `{subreddit}_errors.log`: Subreddit-specific errors
+- Exception messages include detailed context and suggestions
+
+## Testing
+
+The project includes a comprehensive test suite using pytest:
+
+```bash
+# Run all tests
+pytest
+
+# Run with coverage report
+pytest --cov=reddit_scraper
+
+# Run specific test categories
+pytest tests/test_scraper.py -k "test_config"
+```
+
+Test Categories:
+
+- Configuration validation
+- Reddit API integration
+- Image processing and validation
+- Error handling and recovery
+- Resource monitoring
+- Batch processing optimization
+
+Test fixtures and mock data are provided in `tests/test_data/`.
 
 ## Contributing
 
 Feel free to submit issues, fork the repository, and create pull requests for any improvements.
+
+Before contributing:
+
+1. Run the test suite to ensure all tests pass
+2. Add tests for any new functionality
+3. Follow the existing code style and documentation patterns
+4. Update documentation as needed
 
 ## License
 

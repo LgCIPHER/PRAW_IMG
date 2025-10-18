@@ -48,6 +48,19 @@ class CSVCleaner:
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
+        self.image_processor = None
+        
+    async def __aenter__(self):
+        """Set up async context"""
+        self.image_processor = ImageProcessor()
+        await self.image_processor.__aenter__()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Clean up async context"""
+        if self.image_processor:
+            await self.image_processor.__aexit__(exc_type, exc_val, exc_tb)
+            self.image_processor = None
         self.stats = CleaningStats()
         self.memory_cleaner = MemoryEfficientCSVCleaner(max_memory_mb=500)
 
@@ -78,12 +91,11 @@ class CSVCleaner:
             error_log = []
             valid_posts = []
             
-            async with ImageProcessor() as img_processor:
-                for i in tqdm(range(0, len(posts_data), batch_size),
+            for i in tqdm(range(0, len(posts_data), batch_size),
                             desc=f"Cleaning r/{subreddit_name}",
                             unit="batch"):
                     batch = posts_data[i:i + batch_size]
-                    result = await self._process_url_batch(batch, img_processor)
+                    result = await self._process_url_batch(batch, self.image_processor)
                     
                     valid_posts.extend(result.valid_posts)
                     self.stats.total_removed += result.removed_count
@@ -145,13 +157,23 @@ class CSVCleaner:
                     continue
 
                 # Then check if the image is accessible
-                result = await img_processor.validate_image(url)
-                if result.is_valid:
-                    valid_posts.append(post)
-                else:
+                if not img_processor.session or img_processor.session.closed:
+                    await img_processor.__aenter__()
+
+                try:
+                    async with img_processor.session.get(url) as response:
+                        if response.status != 200:
+                            removed_count += 1
+                            error_urls.append(url)
+                            error_messages.append(f"HTTP {response.status}")
+                            continue
+
+                        # Image accessible and valid
+                        valid_posts.append(post)
+                except:
                     removed_count += 1
                     error_urls.append(url)
-                    error_messages.append(result.message or "Image validation failed")
+                    error_messages.append("Download failed")
 
             except Exception as e:
                 removed_count += 1

@@ -1,15 +1,33 @@
-"""Image processing functionality for Reddit Image Scraper"""
+"""Enhanced image processing with batch operations and error handling"""
 
 import cv2 as cv
 import numpy as np
 import aiohttp
 import asyncio
-from typing import Tuple, Optional
+import io
+from typing import Dict, List, Optional, Tuple, Any
 import logging
 from dataclasses import dataclass
-from typing import List
-import time
 from functools import wraps
+import time
+import psutil
+from contextlib import asynccontextmanager
+from PIL import Image
+
+from .base import ProcessingStatistics, RedditScraperException
+from .image_hash import ImageHashProcessor, HashComparisonResult
+
+class ImageProcessingError(RedditScraperException):
+    """Base exception for image processing errors"""
+    pass
+
+class DownloadError(ImageProcessingError):
+    """Raised when image download fails"""
+    pass
+
+class ValidationError(ImageProcessingError):
+    """Raised when image validation fails"""
+    pass
 from .image_hash import ImageHashProcessor, HashComparisonResult
 
 @dataclass
@@ -17,37 +35,60 @@ class ImageValidationResult:
     """Result of image validation"""
     is_valid: bool
     is_deleted: bool
+    width: Optional[int] = None
+    height: Optional[int] = None
+    size: Optional[int] = None
     is_similar: bool = False
     similar_to: Optional[str] = None
     hash_difference: Optional[int] = None
     message: Optional[str] = None
+    skip_reason: str = ""  # Added for CSV cleaning process
 
 class ImageProcessor:
     """Handles image downloading and validation"""
     
-    def __init__(self, min_size_bytes: int = 10240, hash_config: Optional[dict] = None):
-        self.min_size_bytes = min_size_bytes
+    def __init__(self, config_manager = None):
+        self.min_size_bytes = getattr(config_manager.scraping_config, "min_image_size", 10240) if config_manager else 10240
         self.session = None
         self.logger = logging.getLogger(__name__)
         self.hash_processor = None
         
         # Initialize hash processor if config is provided
-        if hash_config is not None:
+        if config_manager and hasattr(config_manager.scraping_config, "hash_config"):
+            hash_config = config_manager.scraping_config.hash_config
             self.hash_processor = ImageHashProcessor(
-                hash_file=hash_config["hash_file"],
-                hash_threshold=hash_config["hash_threshold"]
+                hash_file=hash_config.hash_file,
+                hash_threshold=hash_config.hash_threshold,
+                session=self.session  # Pass our session to the hash processor
             )
 
     async def __aenter__(self):
         """Set up async context"""
-        timeout = aiohttp.ClientTimeout(total=30)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        if not self.session or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+            
+            # Update hash processor's session if it exists
+            if self.hash_processor:
+                self.hash_processor.session = self.session
+                self.hash_processor._owns_session = False
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Clean up async context"""
-        if self.session:
-            await self.session.close()
+        try:
+            if self.hash_processor:
+                # Ensure hash processor saves any pending changes
+                self.hash_processor._save_hashes()
+                # Clear the session reference but don't close it
+                self.hash_processor.session = None
+                
+            if self.session and not self.session.closed:
+                await self.session.close()
+                self.session = None
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {str(e)}")
+            raise
 
     def rate_limit(calls_per_second: float = 1.0):
         """Decorator for rate limiting"""
@@ -94,53 +135,81 @@ class ImageProcessor:
                 return ImageValidationResult(
                     is_valid=False, 
                     is_deleted=True,
-                    message="Failed to download image"
+                    message="Failed to download image",
+                    skip_reason="download_failed",
+                    width=None,
+                    height=None,
+                    size=0
                 )
 
+            # Get image dimensions
+            height, width = image.shape[:2]
+            size = image.nbytes
+
             # Check if image is deleted (60x130 is Reddit's deleted image size)
-            if image.shape[0] == 60 and image.shape[1] == 130:
+            if height == 60 and width == 130:
                 return ImageValidationResult(
                     is_valid=False, 
                     is_deleted=True,
-                    message="Image is deleted"
+                    message="Image is deleted",
+                    skip_reason="deleted",
+                    width=width,
+                    height=height,
+                    size=size
                 )
+
+            # Get image dimensions
+            height, width = image.shape[:2]
+            size = image.nbytes
 
             # Check minimum size
             if not self._check_image_size(image):
                 return ImageValidationResult(
                     is_valid=False, 
                     is_deleted=False,
-                    message="Image too small"
+                    message="Image too small",
+                    skip_reason="too_small",
+                    width=width,
+                    height=height,
+                    size=size
                 )
 
             # Perform hash comparison if enabled
-            if self.hash_processor:
-                async with self.hash_processor:
-                    hash_result = await self.hash_processor.compare_image(url)
-                    if hash_result.is_similar:
-                        return ImageValidationResult(
-                            is_valid=False,
-                            is_deleted=False,
-                            is_similar=True,
-                            similar_to=hash_result.similar_to,
-                            hash_difference=hash_result.hash_difference,
-                            message=f"Similar to existing image (difference: {hash_result.hash_difference})"
-                        )
-                    
-                    # Add hash to database for valid images
-                    await self.hash_processor.add_image_hash(url)
+            if self.hash_processor and self.hash_processor.session:
+                hash_result = await self.hash_processor.compare_image(url)
+                if hash_result.is_similar:
+                    return ImageValidationResult(
+                        is_valid=False,
+                        is_deleted=False,
+                        is_similar=True,
+                        similar_to=hash_result.similar_to,
+                        hash_difference=hash_result.hash_difference,
+                        message=f"Similar to existing image (difference: {hash_result.hash_difference})",
+                        skip_reason="duplicate",
+                        width=width,
+                        height=height,
+                        size=size
+                    )
+                
+                # Add hash to database for valid images
+                await self.hash_processor.add_image_hash(url)
 
             return ImageValidationResult(
                 is_valid=True, 
                 is_deleted=False,
-                message="Image is valid"
+                message="Image is valid",
+                skip_reason="",  # Empty string for valid images
+                width=width,
+                height=height,
+                size=size
             )
 
         except Exception as e:
             return ImageValidationResult(
                 is_valid=False, 
                 is_deleted=False,
-                message=str(e)
+                message=str(e),
+                skip_reason="error"
             )
 
     def _check_image_size(self, image: np.ndarray) -> bool:
@@ -150,17 +219,30 @@ class ImageProcessor:
         except Exception:
             return False
 
-    @staticmethod
-    def is_valid_format(url: str, supported_formats: List[str]) -> bool:
+    def is_valid_format(self, url: str, supported_formats: List[str]) -> bool:
         """Check if URL points to a supported image format"""
         try:
+            # Skip non-url entries
+            if not url or not isinstance(url, str):
+                return False
+                
+            # Skip gallery links
+            if '/gallery/' in url:
+                return False
+            
+            # Skip video links    
+            if 'v.redd.it' in url:
+                return False
+                
+            # Check for image extensions
             url_lower = url.lower()
             is_valid = any(f".{fmt}" in url_lower for fmt in supported_formats)
             if not is_valid:
-                logging.getLogger(__name__).info(f"Invalid format URL: {url}")
+                self.logger.info(f"Invalid format URL: {url}")
             return is_valid
+            
         except Exception as e:
-            logging.getLogger(__name__).error(f"Error checking format for URL {url}: {e}")
+            self.logger.error(f"Error checking format for URL {url}: {e}")
             return False
 
     async def compare_images(self, url1: str, url2: str) -> bool:

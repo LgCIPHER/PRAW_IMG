@@ -1,20 +1,20 @@
-"""Main Reddit Image Scraper implementation"""
+"""Main Reddit Image Scraper implementation with dependency injection and state management."""
 
 import asyncio
 from typing import List, Set, Dict, Optional, Tuple
 import logging
 from dataclasses import dataclass, field
 import os
-from tqdm import tqdm
+from datetime import datetime
 import asyncpraw
-from .auth import CredentialTester
 
+from .core.base import ScraperState, EventManager, ProgressStats, ScraperEvent
+from .core.rate_limiter import RateLimiter
 from .config import ConfigManager
+from .image_processor import ImageProcessor
 from .data_manager import DataManager, RedditPost
-from .image_processor import ImageProcessor, ImageValidationResult
 from .session_manager import SessionManager
-from .retry_handler import with_retry
-from .progress_manager import ProgressManager, ResumableOperation
+from .retry import with_retry, RetryConfig
 
 @dataclass
 class ScrapingStats:
@@ -28,266 +28,309 @@ class ScrapingStats:
         'duplicate': 0,
         'excluded_domain': 0,
         'deleted': 0,
+        'validation_failed': 0,
         'similar': 0
     })
+    start_time: datetime = field(default_factory=datetime.now)
 
 class RedditImageScraper:
-    """Main class for Reddit image scraping operations"""
-    
-    def __init__(self, config_path: str):
-        # Get the parent directory (PRAW_IMG folder)
-        self.dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        self.config_manager = ConfigManager(config_path)
-        self.data_manager = DataManager()
+    """Main scraper class with dependency injection and state management"""
+    def __init__(
+        self,
+        config_path: str,
+        config_manager: Optional[ConfigManager] = None,
+        image_processor: Optional[ImageProcessor] = None,
+        data_manager: Optional[DataManager] = None,
+        event_manager: Optional[EventManager] = None
+    ):
+        self.config_path = config_path
+        self.config_manager = config_manager or ConfigManager(config_path)
+        # Initialize image processor with configuration
+        self.image_processor = image_processor or ImageProcessor(self.config_manager)
+        self.data_manager = data_manager or DataManager()
+        self.event_manager = event_manager or EventManager()
+        self.rate_limiter = RateLimiter()
+        self.state = ScraperState.INITIALIZING
         self.session_manager = SessionManager()
-        self.progress_manager = ProgressManager()
-        self.image_processor = None
         self.reddit = None
         self.logger = logging.getLogger(__name__)
         self.stats = ScrapingStats()
+        self._progress: Optional[ProgressStats] = None
 
-    async def test_reddit_credentials(self) -> bool:
-        """Test Reddit credentials by attempting to authenticate"""
-        try:
-            self.reddit = asyncpraw.Reddit(
-                **self.config_manager.reddit_credentials
+    def set_event_manager(self, event_manager: EventManager) -> None:
+        """Set the event manager for progress updates."""
+        self.event_manager = event_manager
+
+    async def _update_progress(self) -> None:
+        """Update and publish progress."""
+        if self._progress and self.event_manager:
+            await self.event_manager.publish(
+                ScraperEvent("progress_update", {"stats": self._progress})
             )
-            
-            user = await self.reddit.user.me()
-            if user is None:
-                self.logger.error("Authentication failed: Could not get user information")
-                return False
-                
-            # Test basic API access
-            subreddit = await self.reddit.subreddit("announcements")
-            async for _ in subreddit.hot(limit=1):
-                break
-                
-            self.logger.info(f"[SUCCESS] Successfully authenticated as: {user.name}")
-            self.logger.info("[SUCCESS] API access verified")
-            return True
-            
-        except Exception as e:
-            error_message = str(e).lower()
-            
-            if "client_id" in error_message or "client_secret" in error_message:
-                self.logger.error("Client Authentication Error:")
-                self.logger.error("The client_id or client_secret is incorrect")
-            elif "permission" in error_message or "unauthorized" in error_message:
-                self.logger.error("Permission Error:")
-                self.logger.error("The username or password is incorrect")
-            elif "ratelimit" in error_message:
-                self.logger.error("Rate Limit Error:")
-                self.logger.error("Too many requests. Please wait a few minutes and try again")
-            elif "timeout" in error_message:
-                self.logger.error("Connection Timeout:")
-                self.logger.error("Could not connect to Reddit. Please check your internet connection")
-            else:
-                self.logger.error(f"Authentication Error: {str(e)}")
-                self.logger.error("Please verify all credentials in reddit_config.json")
-                
-            # Log the actual error for debugging
-            self.logger.debug(f"Original error: {str(e)}")
-            return False
 
-    async def initialize(self) -> bool:
-        """Initialize the scraper"""
-        try:
-            # Load and validate configuration
-            if not await self.config_manager.load_config():
-                return False
-                
-            if not self.config_manager.validate_config():
-                return False
-
-            # Test credentials before initializing PRAW
-            self.logger.info("Validating Reddit credentials...")
-            credential_tester = CredentialTester()
-            if not await credential_tester.validate_credentials(self.config_manager.reddit_credentials):
-                return False
-
-            # If credentials are valid, initialize PRAW client
-            self.reddit = asyncpraw.Reddit(**self.config_manager.reddit_credentials)
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Initialization failed: {e}")
-            return False
-
-    @with_retry(max_attempts=3, base_delay=1.0)
-    async def process_subreddit(self, subreddit_name: str) -> Tuple[List[RedditPost], Set[str]]:
-        """Process a single subreddit"""
-        self.logger.info(f"Starting processing of r/{subreddit_name}")
-        
-        # Set up file paths
-        lst_img_name = f"{subreddit_name}_img_list.csv"
-        lst_img_dir = self.data_manager.get_file_path(lst_img_name)
-        
-        if not os.path.exists(lst_img_dir):
-            if not await self._should_create_subreddit_file(subreddit_name, lst_img_dir):
-                return [], set()
-
-        # Load existing URLs
-        existing_urls = await self.data_manager.read_existing_urls(lst_img_dir)
+    @with_retry(RetryConfig(max_retries=3, base_delay=1.0))
+    async def _process_post(self, post: asyncpraw.models.Submission) -> Optional[RedditPost]:
+        """Process a single Reddit post."""
+        await self.rate_limiter.acquire()
         
         try:
-            # Get subreddit submissions
-            subreddit = await self.reddit.subreddit(subreddit_name)
-            submissions = [s async for s in subreddit.top(
-                limit=self.config_manager.scraping_config.post_limit
-            )]
-            
-            # Pre-filter submissions
-            candidate_submissions = []
-            
-            for submission in submissions:
-                url = submission.url.lower()
+            # Check if URL has a valid image format
+            if not hasattr(self.config_manager.scraping_config, 'supported_formats'):
+                self.config_manager.scraping_config.supported_formats = ['jpg', 'jpeg', 'png', 'gif']
+            # Get supported formats from config or use defaults
+            supported_formats = getattr(self.config_manager.scraping_config, 'supported_formats', ['jpg', 'jpeg', 'png', 'gif'])
+
+            # Check if it's a valid image format
+            if not self.image_processor.is_valid_format(post.url, supported_formats):
+                self.stats.skipped_stats['wrong_format'] += 1
+                return None
                 
-                # Quick filtering
-                if not ImageProcessor.is_valid_format(
-                    url, self.config_manager.scraping_config.supported_formats):
-                    self.stats.skipped_stats['wrong_format'] += 1
-                    continue
-                    
-                if url in existing_urls:
-                    self.stats.skipped_stats['duplicate'] += 1
-                    continue
-                    
-                if submission.domain in self.config_manager.scraping_config.excluded_domains:
-                    self.stats.skipped_stats['excluded_domain'] += 1
-                    continue
-                    
-                candidate_submissions.append(submission)
-            
-            # Process candidates
-            new_posts = []
-            post_id = len(existing_urls) + 1
-            
-            # Only pass hash config if hash comparison is enabled
-            hash_config = None
-            if self.config_manager.scraping_config.hash_config.enable_hash_comparison:
-                hash_config = {
-                    "hash_file": self.config_manager.scraping_config.hash_config.hash_file,
-                    "hash_threshold": self.config_manager.scraping_config.hash_config.hash_threshold
-                }
-            
-            async with ImageProcessor(
-                self.config_manager.scraping_config.min_image_size,
-                hash_config=hash_config) as img_processor:
-                for submission in tqdm(candidate_submissions,
-                                     desc=f"Processing r/{subreddit_name}",
-                                     unit="post"):
-                    result = await img_processor.validate_image(submission.url)
-                    
-                    if result.is_valid:
-                        post = RedditPost(
-                            id=post_id,
-                            subreddit_name=subreddit_name,
-                            post_title=submission.title,
-                            reddit_link=submission.url
-                        )
-                        new_posts.append(post)
-                        existing_urls.add(submission.url.lower())
-                        post_id += 1
-                        self.stats.total_new_images += 1
-                    elif result.is_deleted:
-                        self.stats.skipped_stats['deleted'] += 1
-                        self.logger.info(f"Skipped deleted image: {submission.url}")
-                    elif result.is_similar:
-                        self.stats.skipped_stats['similar'] += 1
-                        self.logger.info(
-                            f"Skipped similar image: {submission.url} "
-                            f"(similar to {result.similar_to}, "
-                            f"difference: {result.hash_difference})"
-                        )
-                        
-            # Save new posts
-            if new_posts:
-                await self.data_manager.save_posts(
-                    new_posts, lst_img_dir, f"new posts from r/{subreddit_name}", True)
+            if hasattr(post, 'is_video') and post.is_video:
+                self.stats.skipped_stats['wrong_format'] += 1
+                return None
                 
-            return new_posts, existing_urls
+            # Check domain exclusions
+            if post.domain in self.config_manager.scraping_config.excluded_domains:
+                self.stats.skipped_stats['excluded_domain'] += 1
+                return None
             
+            # Validate image using the processor
+            try:
+                result = await self.image_processor.validate_image(post.url)
+                
+                if result.is_valid:
+                    return RedditPost(
+                        subreddit=post.subreddit.display_name,
+                        url=post.url,
+                        width=result.width,
+                        height=result.height,
+                        size=result.size
+                    )
+                else:
+                    reason = result.skip_reason or 'validation_failed'
+                    self.stats.skipped_stats[reason] += 1
+                    self.logger.debug(f"Image validation failed for {post.url}: {result.message} (reason: {reason})")
+            except AttributeError as e:
+                self.logger.error(f"Session error while validating image {post.url}: {str(e)}")
+                self.stats.errors += 1
+                raise
+                
         except Exception as e:
-            self.logger.error(f"Error processing r/{subreddit_name}: {e}")
+            self.logger.error(f"Error processing post {post.url}: {str(e)}")
             self.stats.errors += 1
-            return [], existing_urls
+            self.rate_limiter.report_error()
+        
+        return None
 
-    async def _should_create_subreddit_file(self, subreddit_name: str, 
-                                          file_path: str) -> bool:
-        """Ask user if they want to create a new CSV file"""
-        while True:
-            response = input(
-                f"\nCSV file not found for r/{subreddit_name}.\n"
-                f"Do you want to create {os.path.basename(file_path)} "
-                f"and start scraping? (y/n): "
-            ).lower().strip()
+    async def initialize(self) -> None:
+        """Initialize the scraper and its dependencies."""
+        try:
+            self.state = ScraperState.LOADING_CONFIG
+            await self.config_manager.load()
             
-            if response in ['y', 'n']:
-                return response == 'y'
-            print("Please enter 'y' for yes or 'n' for no.")
-
-    async def run(self):
-        """Main execution method"""
-        if not await self.initialize():
-            return
-
-        # Get list of subreddits
-        subreddits = await self.data_manager.read_subreddit_list(
-            self.data_manager.get_file_path("sub_list.csv")
-        )
-        
-        if not subreddits:
-            self.logger.error("No valid subreddits found")
-            return
-
-        # Process all subreddits
-        all_new_posts = []
-        
-        for subreddit in subreddits:
-            self.stats.total_subreddits += 1
-            new_posts, _ = await self.process_subreddit(subreddit)
-            all_new_posts.extend(new_posts)
-
-        # Save summary
-        if all_new_posts:
-            summary_path = self.data_manager.get_file_path(
-                self.config_manager.output_config.summary_filename
+            self.state = ScraperState.CONNECTING
+            self.reddit = await self.session_manager.create_reddit_session(self.config_manager)
+            
+            # Initialize image processor session
+            await self.image_processor.__aenter__()
+            
+            # Initialize progress tracking
+            subreddits = self.data_manager.read_subreddit_list()
+            self._progress = ProgressStats(
+                total_subreddits=len(subreddits),
+                processed_subreddits=0,
+                total_posts=0,
+                processed_posts=0,
+                current_batch=0,
+                total_batches=0,
+                batch_size=0,
+                start_time=datetime.now()
             )
-            await self.data_manager.save_posts(
-                all_new_posts, summary_path, "new images summary"
-            )
+        except Exception as e:
+            self.state = ScraperState.ERROR
+            self.logger.error(f"Initialization failed: {e}")
+            raise
 
-        # Print final statistics
-        self._print_final_stats()
+    async def run(self) -> None:
+        """Run the image scraping process."""
+        try:
+            await self.initialize()
+            self.state = ScraperState.SCRAPING
+            
+            # Ensure image processor session is active
+            if not self.image_processor or not self.image_processor.session:
+                self.logger.info("Reinitializing image processor session")
+                await self.image_processor.__aenter__()
+            
+            subreddits = self.data_manager.read_subreddit_list()
+            self.stats.total_subreddits = len(subreddits)
+            
+            for subreddit_name in subreddits:
+                self._progress.current_subreddit = subreddit_name
+                await self._update_progress()
+                
+                try:
+                    await self._process_subreddit(subreddit_name)
+                except Exception as e:
+                    self.logger.error(f"Error processing subreddit {subreddit_name}: {str(e)}")
+                    self.stats.errors += 1
+                    
+                    # If we encounter a session error, try to reinitialize the session
+                    if "session" in str(e).lower():
+                        self.logger.info("Attempting to reinitialize session after error")
+                        await self.image_processor.__aenter__()
+            
+            self.state = ScraperState.COMPLETED
+            await self._print_final_stats()
+            
+        except Exception as e:
+            self.state = ScraperState.ERROR
+            self.logger.error(f"Scraping process failed: {str(e)}")
+            raise
+        finally:
+            await self.cleanup()
 
-    def _print_final_stats(self):
+    async def run_specific(self, subreddit_name: str) -> None:
+        """Run the scraping process for a specific subreddit."""
+        try:
+            await self.initialize()
+            self.state = ScraperState.SCRAPING
+            
+            self.stats.total_subreddits = 1
+            self._progress.current_subreddit = subreddit_name
+            await self._update_progress()
+            
+            try:
+                await self._process_subreddit(subreddit_name)
+            except Exception as e:
+                self.logger.error(f"Error processing subreddit {subreddit_name}: {str(e)}")
+                self.stats.errors += 1
+            
+            self.state = ScraperState.COMPLETED
+            await self._print_final_stats()
+            
+        except Exception as e:
+            self.state = ScraperState.ERROR
+            self.logger.error(f"Scraping process failed: {str(e)}")
+            raise
+        finally:
+            await self.cleanup()
+
+    async def _process_subreddit(self, subreddit_name: str) -> None:
+        """Process a single subreddit."""
+        subreddit = await self.reddit.subreddit(subreddit_name)
+        posts = []
+        
+        # Get sort type from config
+        sort_type = getattr(self.config_manager.scraping_config, 'sort_type', 'hot')
+        sort_time = getattr(self.config_manager.scraping_config, 'sort_time', 'all')
+        limit = self.config_manager.get_post_limit()
+        batch_size = getattr(self.config_manager.scraping_config, 'batch_size', 10)
+        
+        # Get posts based on sort type
+        if sort_type == 'top':
+            async for post in subreddit.top(time_filter=sort_time, limit=limit):
+                posts.append(post)
+        elif sort_type == 'hot':
+            async for post in subreddit.hot(limit=limit):
+                posts.append(post)
+        elif sort_type == 'new':
+            async for post in subreddit.new(limit=limit):
+                posts.append(post)
+        elif sort_type == 'rising':
+            async for post in subreddit.rising(limit=limit):
+                posts.append(post)
+        
+        # Calculate total posts and batches
+        self._progress.total_posts = len(posts)
+        self._progress.batch_size = batch_size
+        self._progress.total_batches = (len(posts) + batch_size - 1) // batch_size
+        self._progress.current_batch = 0
+        
+        # Process posts in batches
+        new_posts: List[RedditPost] = []
+        for i in range(0, len(posts), batch_size):
+            self._progress.current_batch += 1
+            batch = posts[i:i + batch_size]
+            
+            # Process batch concurrently
+            tasks = [self._process_post(post) for post in batch]
+            batch_results = await asyncio.gather(*tasks)
+            
+            # Filter out None results
+            valid_results = [result for result in batch_results if result]
+            new_posts.extend(valid_results)
+            
+            # Update progress
+            self.stats.total_posts_checked += len(batch)
+            self._progress.processed_posts += len(batch)
+            await self._update_progress()
+        
+        # Save results for this subreddit
+        if new_posts:
+            self.data_manager.save_results(new_posts, subreddit_name)
+            self.stats.total_new_images += len(new_posts)
+        
+        self._progress.processed_subreddits += 1
+        await self._update_progress()
+
+    async def cleanup(self) -> None:
+        """Clean up resources."""
+        if self.reddit:
+            await self.reddit.close()
+        if self.image_processor and self.image_processor.session:
+            await self.image_processor.session.close()
+
+    async def _print_final_stats(self) -> None:
         """Print final scraping statistics"""
         print("\n" + "="*50)
-        print("Scraping Complete!")
+        if self.state == ScraperState.COMPLETED:
+            print("Operation Completed Successfully!")
+        else:
+            print("Operation Completed with Errors")
+            
         print(f"✓ Processed {self.stats.total_subreddits} subreddits")
+        print(f"✓ Checked {self.stats.total_posts_checked} posts")
         print(f"✓ Found {self.stats.total_new_images} new images")
+        
         print("\nSkipped images:")
-        print(f"  - Wrong format: {self.stats.skipped_stats['wrong_format']}")
-        print(f"  - Duplicates: {self.stats.skipped_stats['duplicate']}")
-        print(f"  - Excluded domains: {self.stats.skipped_stats['excluded_domain']}")
-        print(f"  - Deleted: {self.stats.skipped_stats['deleted']}")
-        print(f"  - Similar images: {self.stats.skipped_stats['similar']}")
-        print(f"Errors encountered: {self.stats.errors}")
+        for reason, count in self.stats.skipped_stats.items():
+            if count > 0:
+                print(f"  - {reason.replace('_', ' ').title()}: {count}")
+        
+        if self.stats.errors > 0:
+            print(f"\nErrors encountered: {self.stats.errors}")
+            print("Check the log file for details")
+            
         print("="*50)
 
-    async def clean_csvs(self, specific_subreddit: str = None) -> bool:
-        """Clean CSV files to remove dead links
+    async def clean_csvs(self, specific_subreddit: Optional[str] = None) -> None:
+        """Clean CSV files by validating all URLs."""
+        self.state = ScraperState.CLEANING
         
-        Args:
-            specific_subreddit: If provided, only clean this subreddit's CSV.
-                              If None, clean all subreddit CSVs.
-        """
         try:
-            if specific_subreddit:
-                return await self.data_manager.clean_subreddit_csv(specific_subreddit)
-            else:
-                return await self.data_manager.clean_all_csvs()
+            # Initialize image processor with async context
+            async with ImageProcessor(self.config_manager) as img_processor:
+                subreddits = [specific_subreddit] if specific_subreddit else self.data_manager.read_subreddit_list()
+                
+                for subreddit in subreddits:
+                    self.logger.info(f"Cleaning CSV for {subreddit}")
+                    posts = self.data_manager.read_results(subreddit)
+                    
+                    valid_posts: List[RedditPost] = []
+                    for post in posts:
+                        result = await img_processor.validate_image(post.url)
+                        if result.is_valid:
+                            valid_posts.append(post)
+                        else:
+                            self.stats.skipped_stats[result.skip_reason] += 1
+                    
+                    self.data_manager.save_results(valid_posts, subreddit)
+            
+            self.state = ScraperState.COMPLETED
+            await self._print_final_stats()
+            
         except Exception as e:
-            self.logger.error(f"Error during CSV cleaning: {e}")
-            return False
+            self.state = ScraperState.ERROR
+            self.logger.error(f"Cleaning process failed: {str(e)}")
+            raise

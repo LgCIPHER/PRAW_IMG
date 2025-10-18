@@ -21,29 +21,34 @@ class HashComparisonResult:
 class ImageHashProcessor:
     """Handles perceptual image hashing and comparison"""
     
-    def __init__(self, hash_file: str = 'image_hashes.json', hash_threshold: int = 5):
+    def __init__(self, hash_file: str = 'image_hashes.json', hash_threshold: int = 5, session: Optional[aiohttp.ClientSession] = None):
         """Initialize the ImageHashProcessor.
         
         Args:
             hash_file (str): Path to the JSON file storing image hashes.
             hash_threshold (int): Maximum hash difference to consider images similar.
+            session (Optional[aiohttp.ClientSession]): Existing aiohttp session to use.
         """
         self.hash_file = hash_file
         self.hash_threshold = hash_threshold
         self.hash_database: Dict[str, str] = self._load_hashes()
         self.logger = logging.getLogger(__name__)
-        self.session = None
+        self.session = session
+        self._owns_session = False
     
     async def __aenter__(self):
         """Set up async context"""
-        timeout = aiohttp.ClientTimeout(total=30)
-        self.session = aiohttp.ClientSession(timeout=timeout)
+        if not self.session:
+            timeout = aiohttp.ClientTimeout(total=30)
+            self.session = aiohttp.ClientSession(timeout=timeout)
+            self._owns_session = True
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Clean up async context"""
-        if self.session:
+        if self.session and self._owns_session:
             await self.session.close()
+            self.session = None
     
     def _load_hashes(self) -> Dict[str, str]:
         """Load existing hashes from the JSON file.

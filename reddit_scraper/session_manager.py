@@ -1,19 +1,18 @@
-"""Centralized HTTP session management for efficient connection pooling"""
+"""Centralized session management for HTTP and Reddit API connections."""
 
 import aiohttp
 import asyncio
-from typing import Optional
 import logging
+from typing import Optional
+import asyncpraw
+from .config import ConfigManager
 
 class SessionManager:
-    """Manages a single aiohttp session for the entire application
-    
-    This prevents the overhead of creating multiple sessions and
-    provides efficient connection pooling across all HTTP requests.
-    """
+    """Manages sessions for both HTTP and Reddit API connections."""
     
     _instance = None
-    _session = None
+    _session: Optional[aiohttp.ClientSession] = None
+    _reddit: Optional[asyncpraw.Reddit] = None
     _lock = asyncio.Lock()
     
     def __new__(cls):
@@ -23,11 +22,7 @@ class SessionManager:
         return cls._instance
     
     async def get_session(self) -> aiohttp.ClientSession:
-        """Get or create the shared session
-        
-        Returns:
-            aiohttp.ClientSession: Configured session with optimal settings
-        """
+        """Get or create the shared HTTP session."""
         async with self._lock:
             if self._session is None or self._session.closed:
                 # Configure timeouts
@@ -48,20 +43,48 @@ class SessionManager:
                 self._session = aiohttp.ClientSession(
                     timeout=timeout,
                     connector=connector,
+                    raise_for_status=True,
                     headers={'User-Agent': 'RedditImageScraper/2.0'}
                 )
                 
                 self.logger.info("Created new HTTP session with connection pooling")
             
             return self._session
+
+    async def create_reddit_session(self, config_manager: ConfigManager) -> asyncpraw.Reddit:
+        """Create and initialize a Reddit API session."""
+        try:
+            credentials = config_manager.get_reddit_credentials()
+            
+            if not all(credentials.get(key) for key in ['client_id', 'client_secret', 'user_agent']):
+                raise ValueError("Missing required Reddit credentials")
+            
+            self._reddit = asyncpraw.Reddit(**credentials)
+            
+            # Test the connection
+            user = await self._reddit.user.me()
+            if user is None:
+                raise ValueError("Failed to authenticate with Reddit")
+                
+            self.logger.info(f"Successfully authenticated as: {user.name}")
+            return self._reddit
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create Reddit session: {str(e)}")
+            raise
     
     async def close(self):
-        """Close the shared session"""
+        """Close all shared sessions."""
         async with self._lock:
             if self._session and not self._session.closed:
                 await self._session.close()
                 self._session = None
                 self.logger.info("Closed HTTP session")
+            
+            if self._reddit:
+                await self._reddit.close()
+                self._reddit = None
+                self.logger.info("Closed Reddit session")
     
     async def __aenter__(self):
         """Support async context manager"""
@@ -73,55 +96,11 @@ class SessionManager:
         pass
 
 
-class ImageProcessor:
-    """Enhanced ImageProcessor using shared session"""
-    
-    def __init__(self, min_size_bytes: int = 10240, hash_config: Optional[dict] = None):
-        self.min_size_bytes = min_size_bytes
-        self.logger = logging.getLogger(__name__)
-        self.session_manager = SessionManager()
-        self.hash_processor = None
-        
-        if hash_config is not None:
-            from .image_hash import ImageHashProcessor
-            self.hash_processor = ImageHashProcessor(
-                hash_file=hash_config["hash_file"],
-                hash_threshold=hash_config["hash_threshold"]
-            )
-    
     async def __aenter__(self):
-        """Get session on context enter"""
-        self.session = await self.session_manager.get_session()
-        return self
+        """Support async context manager"""
+        return await self.get_session()
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Session is managed globally, so no cleanup needed here"""
+        """Clean up on context exit"""
+        # Don't close session here - it's shared
         pass
-    
-    async def download_image(self, url: str) -> Optional[bytes]:
-        """Download image using shared session"""
-        try:
-            async with self.session.get(url) as response:
-                if response.status != 200:
-                    self.logger.warning(
-                        f"Failed to download {url}: Status {response.status}"
-                    )
-                    return None
-                return await response.read()
-        except asyncio.TimeoutError:
-            self.logger.warning(f"Timeout downloading {url}")
-            return None
-        except aiohttp.ClientError as e:
-            self.logger.error(f"Client error downloading {url}: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"Unexpected error downloading {url}: {e}")
-            return None
-
-
-# Usage example in main.py cleanup
-async def cleanup_resources():
-    """Properly close all shared resources"""
-    session_manager = SessionManager()
-    await session_manager.close()
-    logging.info("All resources cleaned up")

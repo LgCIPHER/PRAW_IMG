@@ -1,67 +1,119 @@
-"""Data management for Reddit Image Scraper"""
+"""Data management for Reddit Image Scraper."""
 
 import os
-import aiocsv
-from dataclasses import dataclass
+import csv
+from dataclasses import dataclass, field
 from typing import List, Dict, Set, Optional
 import logging
-import aiofiles
+
+DEFAULT_SUBREDDITS_FILE = "sub_list.csv"
+DEFAULT_RESULTS_FILE = "new_img.csv"
 
 @dataclass
 class RedditPost:
-    """Represents a Reddit post with image"""
-    id: int
-    subreddit_name: str
-    post_title: str
-    reddit_link: str
-    processed: bool = False
+    """Represents a Reddit post with image."""
+    subreddit: str
+    url: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    size: Optional[int] = None
+    metadata: Dict[str, any] = field(default_factory=dict)
 
 class DataManager:
-    """Handles all data persistence operations"""
+    """Handles all data persistence operations."""
     
-    def __init__(self):
-        # Get the parent directory (PRAW_IMG folder)
-        self.dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = base_dir or os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         self.logger = logging.getLogger(__name__)
-        self.cleaner = None  # Lazy initialization of CSVCleaner
         
     def get_file_path(self, filename: str) -> str:
-        """Get absolute path for a file"""
-        return os.path.join(self.dir_path, filename)
+        """Get absolute path for a file."""
+        return os.path.join(self.base_dir, filename)
         
-    async def read_subreddit_list(self, file_path: str) -> List[str]:
-        """Read and validate subreddit names from CSV"""
+    def read_subreddit_list(self, file_path: Optional[str] = None) -> List[str]:
+        """Read and validate subreddit names from CSV.
+        
+        Args:
+            file_path: Optional path to subreddits file. If not provided,
+                      uses default path.
+        """
+        file_path = file_path or self.get_file_path(DEFAULT_SUBREDDITS_FILE)
         subreddits = []
         
         if not os.path.exists(file_path):
             self.logger.error(f"Subreddit list file not found: {file_path}")
             return subreddits
-        
-        try:
-            async with aiofiles.open(file_path, mode='r', encoding='utf-8-sig') as f:
-                content = await f.read()
-                for line_num, line in enumerate(content.splitlines(), 1):
-                    sub = line.strip()
-                    if sub and not sub.startswith('#'):
-                        if self._validate_subreddit_name(sub):
-                            subreddits.append(sub)
-                        else:
-                            self.logger.warning(f"Invalid subreddit name on line {line_num}: {sub}")
-                            
-            self.logger.info(f"✓ Found {len(subreddits)} subreddits to process")
-            return subreddits
             
+        try:
+            with open(file_path, mode='r', encoding='utf-8-sig') as f:
+                for line in f:
+                    subreddit = line.strip()
+                    if subreddit and not subreddit.startswith('#'):
+                        subreddits.append(subreddit)
+            return subreddits
         except Exception as e:
             self.logger.error(f"Error reading subreddit list: {e}")
-            return subreddits
+            return []
 
+    def save_results(self, posts: List[RedditPost], subreddit: str) -> None:
+        """Save processed posts to CSV file."""
+        file_path = self.get_file_path(f"{subreddit}_img_list.csv")
+        
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            # Write to CSV
+            with open(file_path, mode='w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=['subreddit', 'url', 'width', 'height', 'size'])
+                writer.writeheader()
+                for post in posts:
+                    writer.writerow({
+                        'subreddit': post.subreddit,
+                        'url': post.url,
+                        'width': post.width or '',
+                        'height': post.height or '',
+                        'size': post.size or ''
+                    })
+            
+            self.logger.info(f"Saved {len(posts)} results to {file_path}")
+        except Exception as e:
+            self.logger.error(f"Error saving results to {file_path}: {e}")
+            raise
+
+    def read_results(self, subreddit: str) -> List[RedditPost]:
+        """Read processed posts from CSV file."""
+        file_path = self.get_file_path(f"{subreddit}_img_list.csv")
+        posts = []
+        
+        if not os.path.exists(file_path):
+            self.logger.warning(f"No results file found for r/{subreddit}")
+            return posts
+            
+        try:
+            with open(file_path, mode='r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    post = RedditPost(
+                        subreddit=row['subreddit'],
+                        url=row['url'],
+                        width=int(row['width']) if row.get('width') else None,
+                        height=int(row['height']) if row.get('height') else None,
+                        size=int(row['size']) if row.get('size') else None
+                    )
+                    posts.append(post)
+            return posts
+        except Exception as e:
+            self.logger.error(f"Error reading results from {file_path}: {e}")
+            return []
+        
     def _validate_subreddit_name(self, name: str) -> bool:
-        """Validate subreddit name format"""
+        """Validate subreddit name format."""
         return (len(name) <= 50 and 
                 name.replace('_', '').replace('-', '').isalnum())
-
-    async def read_existing_urls(self, file_path: str) -> Set[str]:
-        """Read existing URLs from CSV file"""
+                
+    def read_existing_urls(self, file_path: str) -> Set[str]:
+        """Read existing URLs from CSV file."""
         urls = set()
         
         if not os.path.exists(file_path):
@@ -69,11 +121,11 @@ class DataManager:
             return urls
             
         try:
-            async with aiofiles.open(file_path, mode='r', encoding='utf-8-sig') as f:
-                reader = aiocsv.AsyncDictReader(f)
-                async for row in reader:
-                    if row.get('reddit_link'):
-                        urls.add(row['reddit_link'].lower())
+            with open(file_path, mode='r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if row.get('url'):
+                        urls.add(row['url'].lower())
                         
             self.logger.info(f"✓ Loaded {len(urls)} existing URLs from {os.path.basename(file_path)}")
             return urls
@@ -82,93 +134,64 @@ class DataManager:
             self.logger.error(f"Error reading URLs: {e}")
             return urls
 
-    async def save_posts(self, posts: List[RedditPost], file_path: str, 
-                        description: str = "URLs", append: bool = False) -> bool:
-        """Save posts to CSV file"""
-        if not posts:
-            self.logger.info(f"No {description.lower()} to save")
-            return True
-            
-        try:
-            mode = "a" if append and os.path.exists(file_path) else "w"
-            headers = ['id', 'subreddit_name', 'post_title', 'reddit_link']
-            
-            async with aiofiles.open(file_path, mode=mode, encoding='utf-8-sig', 
-                                   newline='') as f:
-                writer = aiocsv.AsyncDictWriter(f, fieldnames=headers)
-                
-                if mode == "w":
-                    await writer.writeheader()
-                    
-                for post in posts:
-                    row = {h: getattr(post, h) for h in headers}
-                    await writer.writerow(row)
-                    
-            self.logger.info(f"✓ Saved {len(posts)} {description.lower()} to {os.path.basename(file_path)}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error saving {description.lower()} to {file_path}: {e}")
-            return False
-
-    async def save_error_log(self, subreddit: str, errors: List[str]) -> None:
-        """Save error messages to log file"""
+    def save_error_log(self, subreddit: str, errors: List[str]) -> None:
+        """Save error messages to log file."""
         if not errors:
             return
             
         try:
             error_log_file = self.get_file_path(f"{subreddit}_errors.log")
-            async with aiofiles.open(error_log_file, 'w', encoding='utf-8') as f:
-                await f.write('\n'.join(errors))
+            with open(error_log_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(errors))
                 
             self.logger.info(f"Error details saved to {subreddit}_errors.log")
             
         except Exception as e:
-                        self.logger.error(f"Failed to save error log for {subreddit}: {e}")
+            self.logger.error(f"Failed to save error log for {subreddit}: {e}")
 
     async def clean_all_csvs(self) -> bool:
         """Clean all subreddit CSV files"""
         from .cleaner import CSVCleaner  # Lazy import to avoid circular dependencies
         
-        if self.cleaner is None:
-            self.cleaner = CSVCleaner()
-
         # Get list of subreddits
         subreddits = await self.read_subreddit_list(self.get_file_path("sub_list.csv"))
         if not subreddits:
             self.logger.error("No subreddits found to scan")
             return False
 
-        # Process each subreddit's CSV
-        for subreddit in subreddits:
-            self.cleaner.stats.total_subreddits += 1
-            csv_path = self.get_file_path(f"{subreddit}_img_list.csv")
-            
-            if not os.path.exists(csv_path):
-                self.logger.warning(f"Skipping r/{subreddit}: No CSV file found")
-                continue
+        # Create cleaner inside async context
+        async with CSVCleaner() as cleaner:
+            # Process each subreddit's CSV
+            for subreddit in subreddits:
+                cleaner.stats.total_subreddits += 1
+                csv_path = self.get_file_path(f"{subreddit}_img_list.csv")
                 
-            await self.cleaner.clean_subreddit_csv(csv_path, subreddit)
+                if not os.path.exists(csv_path):
+                    self.logger.warning(f"Skipping r/{subreddit}: No CSV file found")
+                    continue
+                    
+                await cleaner.clean_subreddit_csv(csv_path, subreddit)
 
-        # Print final statistics
-        self.cleaner.stats.print_summary()
+            # Print final statistics
+            cleaner.stats.print_summary()
+
         return True
 
     async def clean_subreddit_csv(self, subreddit: str) -> bool:
         """Clean a specific subreddit's CSV file"""
         from .cleaner import CSVCleaner  # Lazy import to avoid circular dependencies
         
-        if self.cleaner is None:
-            self.cleaner = CSVCleaner()
-
         csv_path = self.get_file_path(f"{subreddit}_img_list.csv")
         if not os.path.exists(csv_path):
             self.logger.error(f"CSV file not found for r/{subreddit}")
             return False
 
-        self.cleaner.stats.total_subreddits += 1
-        result = await self.cleaner.clean_subreddit_csv(csv_path, subreddit)
-        
-        # Print statistics for single subreddit clean
-        self.cleaner.stats.print_summary()
+        # Create cleaner inside async context
+        async with CSVCleaner() as cleaner:
+            cleaner.stats.total_subreddits += 1
+            result = await cleaner.clean_subreddit_csv(csv_path, subreddit)
+            
+            # Print statistics for single subreddit clean
+            cleaner.stats.print_summary()
+            
         return result
