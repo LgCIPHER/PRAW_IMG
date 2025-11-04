@@ -55,19 +55,29 @@ class DataManager:
             self.logger.error(f"Error reading subreddit list: {e}")
             return []
 
-    def save_results(self, posts: List[RedditPost], subreddit: str) -> None:
-        """Save processed posts to CSV file."""
+    def save_results(self, new_posts: List[RedditPost], subreddit: str) -> None:
+        """Save processed posts to CSV file, preserving existing entries."""
         file_path = self.get_file_path(f"{subreddit}_img_list.csv")
         
         try:
+            # Read existing posts
+            existing_posts = self.read_results(subreddit)
+            existing_urls = {post.url for post in existing_posts}
+            
+            # Filter out duplicates from new posts
+            unique_new_posts = [post for post in new_posts if post.url not in existing_urls]
+            
+            # Combine existing and new posts
+            all_posts = existing_posts + unique_new_posts
+            
             # Ensure directory exists
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             
-            # Write to CSV
+            # Write combined results to CSV
             with open(file_path, mode='w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.DictWriter(f, fieldnames=['subreddit', 'url', 'width', 'height', 'size'])
                 writer.writeheader()
-                for post in posts:
+                for post in all_posts:
                     writer.writerow({
                         'subreddit': post.subreddit,
                         'url': post.url,
@@ -76,7 +86,10 @@ class DataManager:
                         'size': post.size or ''
                     })
             
-            self.logger.info(f"Saved {len(posts)} results to {file_path}")
+            self.logger.info(
+                f"Saved {len(all_posts)} results to {file_path} "
+                f"({len(unique_new_posts)} new, {len(existing_posts)} existing)"
+            )
         except Exception as e:
             self.logger.error(f"Error saving results to {file_path}: {e}")
             raise
@@ -87,22 +100,29 @@ class DataManager:
         posts = []
         
         if not os.path.exists(file_path):
-            self.logger.warning(f"No results file found for r/{subreddit}")
+            self.logger.debug(f"No results file found for r/{subreddit}")
             return posts
             
         try:
             with open(file_path, mode='r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row in reader:
-                    post = RedditPost(
-                        subreddit=row['subreddit'],
-                        url=row['url'],
-                        width=int(row['width']) if row.get('width') else None,
-                        height=int(row['height']) if row.get('height') else None,
-                        size=int(row['size']) if row.get('size') else None
-                    )
-                    posts.append(post)
-            return posts
+                    try:
+                        post = RedditPost(
+                            subreddit=row['subreddit'],
+                            url=row['url'],
+                            width=int(row['width']) if row.get('width') and row['width'].strip() else None,
+                            height=int(row['height']) if row.get('height') and row['height'].strip() else None,
+                            size=int(row['size']) if row.get('size') and row['size'].strip() else None
+                        )
+                        posts.append(post)
+                    except (ValueError, KeyError) as e:
+                        self.logger.warning(f"Skipping invalid row in {file_path}: {e}")
+                        continue
+                
+                self.logger.debug(f"Read {len(posts)} existing posts from {file_path}")
+                return posts
+                
         except Exception as e:
             self.logger.error(f"Error reading results from {file_path}: {e}")
             return []
